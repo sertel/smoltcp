@@ -492,6 +492,13 @@ enum IgmpReportState {
     },
 }
 
+#[cfg(feature = "ohua")]
+enum TcpHandling {
+    Emitted,
+    Empty,
+    Break
+}
+
 impl<'a, DeviceT> Interface<'a, DeviceT>
 where
     DeviceT: for<'d> Device<'d>,
@@ -966,6 +973,114 @@ where
         }
         Ok(emitted_any)
     }
+
+    #[cfg(feature = "ohua")]
+    fn socket_egress_tcp(&'a mut self) -> Result<bool> {
+        let inner = &mut self.inner;
+        let sockets = &mut self.sockets;
+
+        let mut emitted_any = false;
+        for item in sockets
+            .iter()
+            .filter(
+                |i| i
+                    .meta
+                    .egress_permitted(inner.now,
+                                      |ip_addr| inner.has_neighbor(&ip_addr)))
+        {
+            match self.socket_egress_tcp_pre(&mut item.socket){
+                Ok((ip_repr, tcp_repr, is_keep_alive)) => {
+                    let neighbor_addr = Some(ip_repr.dst_addr());
+                    match self.socket_egress_tcp_device(
+                        &mut item.socket, (ip_repr, tcp_repr)){
+                        Ok(()) => {
+                            self.socket_egress_tcp_post(
+                                &mut item.socket, (tcp_repr, is_keep_alive));
+                            emitted_any = true;
+                        },
+                        Err(Error::Exhausted) => break, // nowhere to transmit
+                        Err(Error::Unaddressable) => {
+                            // `NeighborCache` already takes care of rate limiting the neighbor discovery
+                            // requests from the socket. However, without an additional rate limiting
+                            // mechanism, we would spin on every socket that has yet to discover its
+                            // neighboor.
+                            item.meta.neighbor_missing(
+                                inner.now,
+                                neighbor_addr.expect("non-IP response packet"),
+                            );
+                            break
+                        }
+                        Err(err) => {
+                            net_debug!(
+                                "{}: cannot dispatch egress packet: {}",
+                                item.meta.handle,
+                                err
+                            );
+                            return Err(err);
+                        }
+                    };
+                }
+                Err(Error::Exhausted) => (), // nothing to transmit
+                Err(err) => {
+                    net_debug!(
+                        "{}: cannot dispatch egress packet: {}",
+                        item.meta.handle,
+                        err
+                    );
+                    return Err(err);
+                }
+            }
+        }
+        Ok(emitted_any)
+    }
+
+    #[cfg(feature = "ohua")]
+    fn socket_egress_tcp_pre(
+        &mut self, socket: &'a mut Socket<'a>
+    ) -> Result<(IpRepr, TcpRepr<'a>, bool)> {
+        match socket {
+            #[cfg(feature = "socket-tcp")]
+            Socket::Tcp(tcp_socket) => tcp_socket.dispatch_before(&mut self.inner),
+            _ => panic!("Only TCP sockets supported!")
+        }
+    }
+
+    #[cfg(feature = "ohua")]
+    fn socket_egress_tcp_device(
+        &mut self, socket: &mut Socket<'a>, pre_result: (IpRepr, TcpRepr<'a>)
+    ) -> Result<()> {
+        let device = &mut self.device;
+
+        match socket {
+            #[cfg(feature = "socket-tcp")]
+            Socket::Tcp(socket) =>
+                socket.dispatch_device(
+                    &mut self.inner,
+                    pre_result,
+                    |inner0, response| {
+                        let response = IpPacket::Tcp(response);
+                        //neighbor_addr = Some(response.ip_repr().dst_addr());
+                        // error handling in the original code seems broken here:
+                        // this is part of socked_result
+                        let tx_token = device.transmit().ok_or(Error::Exhausted)?;
+                        // this is saved away as dev_result
+                        inner0.dispatch_ip(tx_token, response)
+                    }),
+            _ => panic!("Only TCP sockets supported!")
+        }
+   }
+
+    #[cfg(feature = "ohua")]
+    fn socket_egress_tcp_post(
+        &mut self, socket: &mut Socket<'a>, result: (TcpRepr<'a>, bool)
+    ) -> () {
+        match socket {
+            #[cfg(feature = "socket-tcp")]
+            Socket::Tcp(socket) => socket.dispatch_after(&mut self.inner, result),
+            _ => panic!("Only TCP sockets supported!")
+        };
+   }
+
 
     /// Depending on `igmp_report_state` and the therein contained
     /// timeouts, send IGMP membership reports.

@@ -2367,8 +2367,7 @@ impl<'a> TcpSocket<'a> {
         Ok(())
     }
 
-
-
+    #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_before(
         &mut self, cx: &mut Context
     ) -> Result<(IpRepr, TcpRepr, bool)>
@@ -2644,6 +2643,7 @@ impl<'a> TcpSocket<'a> {
         Ok((ip_repr, repr, is_keep_alive))
     }
 
+    #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_device<F>(
         &mut self, cx: &mut Context, (ip_repr,repr):(IpRepr,TcpRepr), emit: F
     ) -> Result<()>
@@ -2653,14 +2653,13 @@ impl<'a> TcpSocket<'a> {
         emit(cx, (ip_repr, repr))
     }
 
+    #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_after(
         &mut self,
         cx: &mut Context,
-        (dev_result, repr, is_keep_alive): (Result<()>, TcpRepr, bool)
-    ) -> Result<()>
+        (repr, is_keep_alive): (TcpRepr, bool)
+    ) -> ()
     {
-        dev_result?;
-
         // We've sent something, whether useful data or a keep-alive packet, so rewind
         // the keep-alive timer.
         self.timer.rewind_keep_alive(cx.now(), self.keep_alive);
@@ -2688,7 +2687,7 @@ impl<'a> TcpSocket<'a> {
         // Leave the rest of the state intact if sending a keep-alive packet, since those
         // carry a fake segment.
         if is_keep_alive {
-            return Ok(());
+            return ();
         }
 
         // We've sent a packet successfully, so we can update the internal state now.
@@ -2713,8 +2712,6 @@ impl<'a> TcpSocket<'a> {
             self.local_endpoint = IpEndpoint::default();
             self.remote_endpoint = IpEndpoint::default();
         }
-
-        Ok(())
     }
 
     #[allow(clippy::if_same_then_else)]
