@@ -58,7 +58,7 @@ impl Meta {
         }
     }
 
-    pub(crate) fn egress_permitted<F>(&mut self, timestamp: Instant, has_neighbor: F) -> bool
+    pub(crate) fn egress_permitted<F>(&self, timestamp: Instant, has_neighbor: F) -> bool
     where
         F: Fn(IpAddress) -> bool,
     {
