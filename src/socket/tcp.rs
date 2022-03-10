@@ -1950,7 +1950,7 @@ impl<'a> TcpSocket<'a> {
         }
     }
 
-    fn seq_to_transmit(&self, cx: &mut Context) -> bool {
+    fn seq_to_transmit(&self, cx: &Context) -> bool {
         let ip_header_len = match self.local_endpoint.addr {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
@@ -2369,7 +2369,7 @@ impl<'a> TcpSocket<'a> {
 
     #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_before(
-        &mut self, cx: &mut Context
+        &mut self, cx: &Context
     ) -> Result<(IpRepr, TcpRepr, bool)>
     {
         if !self.remote_endpoint.is_specified() {
@@ -2656,9 +2656,9 @@ impl<'a> TcpSocket<'a> {
     #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_after(
         &mut self,
-        cx: &mut Context,
+        cx: &Context,
         (repr, is_keep_alive): (TcpRepr, bool)
-    ) -> ()
+    )
     {
         // We've sent something, whether useful data or a keep-alive packet, so rewind
         // the keep-alive timer.
@@ -2687,7 +2687,7 @@ impl<'a> TcpSocket<'a> {
         // Leave the rest of the state intact if sending a keep-alive packet, since those
         // carry a fake segment.
         if is_keep_alive {
-            return ();
+            return;
         }
 
         // We've sent a packet successfully, so we can update the internal state now.
@@ -2754,6 +2754,32 @@ impl<'a> TcpSocket<'a> {
                 .unwrap_or(&PollAt::Ingress)
         }
     }
+
+    #[cfg(feature = "ohua")]
+    pub(crate) fn dispatch_c(&'a mut self, cx: &Context, d: Call<'a>) -> Results<'a> {
+        match d {
+            Call::Pre => {
+                Results::Pre(self.dispatch_before(cx))
+            },
+            Call::Post(tcp_repr, is_keep_alive) => {
+                self.dispatch_after(cx, (tcp_repr, is_keep_alive));
+                Results::Post
+            }
+        }
+    }
+
+}
+
+#[cfg(feature = "ohua")]
+pub enum Results<'a> {
+    Pre(Result<(IpRepr, TcpRepr<'a>, bool)>),
+    Post
+}
+
+#[cfg(feature = "ohua")]
+pub enum Call<'a>{
+    Pre,
+    Post(TcpRepr<'a>, bool)
 }
 
 impl<'a> fmt::Write for TcpSocket<'a> {

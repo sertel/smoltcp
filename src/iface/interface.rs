@@ -6,6 +6,8 @@ use core::cmp;
 use managed::{ManagedMap, ManagedSlice};
 
 use super::socket_set::SocketSet;
+#[cfg(feature = "ohua")]
+use super::socket_meta::Meta;
 use super::{SocketHandle, SocketStorage};
 use crate::iface::Routes;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -492,13 +494,6 @@ enum IgmpReportState {
     },
 }
 
-#[cfg(feature = "ohua")]
-enum TcpHandling {
-    Emitted,
-    Empty,
-    Break
-}
-
 impl<'a, DeviceT> Interface<'a, DeviceT>
 where
     DeviceT: for<'d> Device<'d>,
@@ -976,111 +971,104 @@ where
 
     #[cfg(feature = "ohua")]
     fn socket_egress_tcp(&'a mut self) -> Result<bool> {
-        let inner = &mut self.inner;
+        let mut inner = &self.inner;
+        let device = &mut self.device;
         let sockets = &mut self.sockets;
 
         let mut emitted_any = false;
-        for item in sockets
-            .iter()
-            .filter(
-                |i| i
-                    .meta
-                    .egress_permitted(inner.now,
-                                      |ip_addr| inner.has_neighbor(&ip_addr)))
-        {
-            match self.socket_egress_tcp_pre(&mut item.socket){
-                Ok((ip_repr, tcp_repr, is_keep_alive)) => {
-                    let neighbor_addr = Some(ip_repr.dst_addr());
-                    match self.socket_egress_tcp_device(
-                        &mut item.socket, (ip_repr, tcp_repr)){
-                        Ok(()) => {
-                            self.socket_egress_tcp_post(
-                                &mut item.socket, (tcp_repr, is_keep_alive));
-                            emitted_any = true;
-                        },
-                        Err(Error::Exhausted) => break, // nowhere to transmit
-                        Err(Error::Unaddressable) => {
-                            // `NeighborCache` already takes care of rate limiting the neighbor discovery
-                            // requests from the socket. However, without an additional rate limiting
-                            // mechanism, we would spin on every socket that has yet to discover its
-                            // neighboor.
-                            item.meta.neighbor_missing(
-                                inner.now,
-                                neighbor_addr.expect("non-IP response packet"),
-                            );
-                            break
+        //        let permitted_sockets =
+        //            sockets.
+        //            iter_mut().
+        //            filter(|item|
+        //                   item
+        //                   .meta
+        //                   .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)));
+        for item in sockets.iter_mut() {
+            if !item
+                .meta
+                .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
+            {
+                continue;
+            }
+            match &mut item.socket {
+                #[cfg(feature = "socket-tcp")]
+                Socket::Tcp(tcp_socket) => {
+                    // TODO acquire ownership of the socket. (needs an additional heap allocation)
+                    let res = self.go(inner, device, &mut item.meta, Call::Pre, tcp_socket);
+                    match res {
+                        Ok((tcp_socketp, emitted, true)) => {
+                            // TODO add the socket back into the set of socket
+                            emitted_any = emitted_any || emitted;
                         }
-                        Err(err) => {
-                            net_debug!(
-                                "{}: cannot dispatch egress packet: {}",
-                                item.meta.handle,
-                                err
-                            );
-                            return Err(err);
+                        Ok((tcp_socketp, emitted, false)) => {
+                            // TODO add the socket back into the set of sockets
+                            break;
                         }
-                    };
+                        Err(err) => return Err(err),
+                    }
                 }
-                Err(Error::Exhausted) => (), // nothing to transmit
-                Err(err) => {
-                    net_debug!(
-                        "{}: cannot dispatch egress packet: {}",
-                        item.meta.handle,
-                        err
-                    );
-                    return Err(err);
-                }
+                _ => panic!("Only TCP sockets supported!"),
             }
         }
         Ok(emitted_any)
     }
 
-    #[cfg(feature = "ohua")]
-    fn socket_egress_tcp_pre(
-        &mut self, socket: &'a mut Socket<'a>
-    ) -> Result<(IpRepr, TcpRepr<'a>, bool)> {
-        match socket {
-            #[cfg(feature = "socket-tcp")]
-            Socket::Tcp(tcp_socket) => tcp_socket.dispatch_before(&mut self.inner),
-            _ => panic!("Only TCP sockets supported!")
+    fn go(
+        &self,
+        inner: &'a InterfaceInner<'a>,
+        device: &mut DeviceT,
+        meta: &mut Meta, // meta data external to the socket impl.(neighbor_cache)
+        d: Call<'a>,
+        tcp_socket: TcpSocket<'a>,
+    ) -> Result<(TcpSocket<'a>, bool, bool)> {
+        match tcp_socket.dispatch_c(inner, d) {
+            Results::Pre(pre_result) => match pre_result {
+                Ok((ip_repr, tcp_repr, is_keep_alive)) => {
+                    let neighbor_addr = Some(ip_repr.dst_addr());
+                    match socket_egress_tcp_device(inner, device, (ip_repr, tcp_repr)) {
+                        Ok(()) => 
+                            self.go(
+                                inner, 
+                                device,
+                                meta,
+                                Call::Post(tcp_repr, is_keep_alive), 
+                                tcp_socket),
+                        Err(Error::Exhausted) => 
+                            Ok((tcp_socket, false, false)), // nowhere to transmit
+                        Err(Error::Unaddressable) => {
+                            // `NeighborCache` already takes care of rate limiting the neighbor discovery
+                            // requests from the socket. However, without an additional rate limiting
+                            // mechanism, we would spin on every socket that has yet to discover its
+                            // neighboor.
+                            meta.neighbor_missing(
+                                inner.now,
+                                neighbor_addr.expect("non-IP response packet"),
+                            );
+                            Ok((tcp_socket, false, false))
+                        }
+                        Err(err) => {
+                            net_debug!(
+                                "{}: cannot dispatch egress packet: {}",
+                                meta.handle,
+                                err
+                            );
+                            Err(err)
+                        }
+                    }
+                }
+                Err(Error::Exhausted) => Ok((tcp_socket, false, true)), // nothing to transmit
+                Err(err) => {
+                    net_debug!(
+                        "{}: cannot dispatch egress packet: {}",
+                        meta.handle,
+                        err
+                    );
+                    Err(err)
+                }
+            },
+            Results::Post => Ok((tcp_socket, true, true)), // emitted_any = true
         }
     }
-
-    #[cfg(feature = "ohua")]
-    fn socket_egress_tcp_device(
-        &mut self, socket: &mut Socket<'a>, pre_result: (IpRepr, TcpRepr<'a>)
-    ) -> Result<()> {
-        let device = &mut self.device;
-
-        match socket {
-            #[cfg(feature = "socket-tcp")]
-            Socket::Tcp(socket) =>
-                socket.dispatch_device(
-                    &mut self.inner,
-                    pre_result,
-                    |inner0, response| {
-                        let response = IpPacket::Tcp(response);
-                        //neighbor_addr = Some(response.ip_repr().dst_addr());
-                        // error handling in the original code seems broken here:
-                        // this is part of socked_result
-                        let tx_token = device.transmit().ok_or(Error::Exhausted)?;
-                        // this is saved away as dev_result
-                        inner0.dispatch_ip(tx_token, response)
-                    }),
-            _ => panic!("Only TCP sockets supported!")
-        }
-   }
-
-    #[cfg(feature = "ohua")]
-    fn socket_egress_tcp_post(
-        &mut self, socket: &mut Socket<'a>, result: (TcpRepr<'a>, bool)
-    ) -> () {
-        match socket {
-            #[cfg(feature = "socket-tcp")]
-            Socket::Tcp(socket) => socket.dispatch_after(&mut self.inner, result),
-            _ => panic!("Only TCP sockets supported!")
-        };
-   }
-
 
     /// Depending on `igmp_report_state` and the therein contained
     /// timeouts, send IGMP membership reports.
@@ -1141,6 +1129,47 @@ where
             _ => Ok(false),
         }
     }
+}
+
+#[cfg(feature = "ohua")]
+fn socket_egress_tcp_pre<'a>(
+    inner: &'a InterfaceInner<'a>,
+    tcp_socket: &'a mut TcpSocket<'a>,
+) -> Result<(IpRepr, TcpRepr<'a>, bool)> {
+    tcp_socket.dispatch_before(inner)
+}
+
+/// This is in the end not at all a function on the socket but
+/// only on the device and the IP layer.
+#[cfg(feature = "ohua")]
+fn socket_egress_tcp_device<'a, DeviceT: for<'d> Device<'d>>(
+    inner: &'a InterfaceInner<'a>,
+    device: &mut DeviceT,
+    ip_tcp_reps: (IpRepr, TcpRepr<'a>),
+) -> Result<()> {
+    let response = IpPacket::Tcp(ip_tcp_reps);
+    // error handling in the original code seems broken here:
+    // this is part of socked_result
+    let tx_token = device.transmit().ok_or(Error::Exhausted)?;
+    // this is saved away as dev_result
+    // FIXME this is the device independent part and needs to move
+    // to the post function.
+    // But where is really the transfer happening?
+    // How does the data really enter the device?
+    // This is where the transmission actually happens in the consume function!
+    // FIXME data comes actually from the response but the method
+    // also updates the neighborhood_cache
+    inner.dispatch_ip_pure(tx_token, response)
+}
+
+/// This sets the state of the socket when no error occurred.
+#[cfg(feature = "ohua")]
+fn socket_egress_tcp_post<'a>(
+    inner: &'a InterfaceInner<'a>,
+    tcp_socket: &'a mut TcpSocket<'a>,
+    result: (TcpRepr<'a>, bool),
+) -> () {
+    tcp_socket.dispatch_after(inner, result)
 }
 
 impl<'a> InterfaceInner<'a> {
@@ -2299,7 +2328,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ethernet")]
-    fn dispatch_ethernet<Tx, F>(&mut self, tx_token: Tx, buffer_len: usize, f: F) -> Result<()>
+    fn dispatch_ethernet<Tx, F>(&self, tx_token: Tx, buffer_len: usize, f: F) -> Result<()>
     where
         Tx: TxToken,
         F: FnOnce(EthernetFrame<&mut [u8]>),
@@ -2362,6 +2391,143 @@ impl<'a> InterfaceInner<'a> {
             },
             Err(_) => false,
         }
+    }
+
+    #[cfg(any(
+        feature = "medium-ethernet",
+        feature = "medium-ieee802154",
+        feature = "ohua"
+    ))]
+    fn lookup_hardware_addr_pure<Tx>(
+        &self,
+        tx_token: Tx,
+        src_addr: &IpAddress,
+        dst_addr: &IpAddress,
+    ) -> Result<(HardwareAddress, Tx)>
+    where
+        Tx: TxToken,
+    {
+        if dst_addr.is_broadcast() {
+            let hardware_addr = match self.caps.medium {
+                #[cfg(feature = "medium-ethernet")]
+                Medium::Ethernet => HardwareAddress::Ethernet(EthernetAddress::BROADCAST),
+                #[cfg(feature = "medium-ieee802154")]
+                Medium::Ieee802154 => HardwareAddress::Ieee802154(Ieee802154Address::BROADCAST),
+                #[cfg(feature = "medium-ip")]
+                Medium::Ip => unreachable!(),
+            };
+
+            return Ok((hardware_addr, tx_token));
+        }
+
+        if dst_addr.is_multicast() {
+            let b = dst_addr.as_bytes();
+            let hardware_addr = match *dst_addr {
+                IpAddress::Unspecified => unreachable!(),
+                #[cfg(feature = "proto-ipv4")]
+                IpAddress::Ipv4(_addr) => {
+                    HardwareAddress::Ethernet(EthernetAddress::from_bytes(&[
+                        0x01,
+                        0x00,
+                        0x5e,
+                        b[1] & 0x7F,
+                        b[2],
+                        b[3],
+                    ]))
+                }
+                #[cfg(feature = "proto-ipv6")]
+                IpAddress::Ipv6(_addr) => match self.caps.medium {
+                    #[cfg(feature = "medium-ethernet")]
+                    Medium::Ethernet => HardwareAddress::Ethernet(EthernetAddress::from_bytes(&[
+                        0x33, 0x33, b[12], b[13], b[14], b[15],
+                    ])),
+                    #[cfg(feature = "medium-ieee802154")]
+                    Medium::Ieee802154 => {
+                        // Not sure if this is correct
+                        HardwareAddress::Ieee802154(Ieee802154Address::BROADCAST)
+                    }
+                    #[cfg(feature = "medium-ip")]
+                    Medium::Ip => unreachable!(),
+                },
+            };
+
+            return Ok((hardware_addr, tx_token));
+        }
+
+        let dst_addr = self.route(dst_addr, self.now)?;
+
+        match self
+            .neighbor_cache
+            .as_ref()
+            .unwrap()
+            .lookup(&dst_addr, self.now)
+        {
+            NeighborAnswer::Found(hardware_addr) => return Ok((hardware_addr, tx_token)),
+            NeighborAnswer::RateLimited => return Err(Error::Unaddressable),
+            _ => (), // XXX
+        }
+
+        match (src_addr, dst_addr) {
+            #[cfg(feature = "proto-ipv4")]
+            (&IpAddress::Ipv4(src_addr), IpAddress::Ipv4(dst_addr)) => {
+                net_debug!(
+                    "address {} not in neighbor cache, sending ARP request",
+                    dst_addr
+                );
+                let src_hardware_addr =
+                    if let Some(HardwareAddress::Ethernet(addr)) = self.hardware_addr {
+                        addr
+                    } else {
+                        return Err(Error::Malformed);
+                    };
+
+                let arp_repr = ArpRepr::EthernetIpv4 {
+                    operation: ArpOperation::Request,
+                    source_hardware_addr: src_hardware_addr,
+                    source_protocol_addr: src_addr,
+                    target_hardware_addr: EthernetAddress::BROADCAST,
+                    target_protocol_addr: dst_addr,
+                };
+
+                self.dispatch_ethernet(tx_token, arp_repr.buffer_len(), |mut frame| {
+                    frame.set_dst_addr(EthernetAddress::BROADCAST);
+                    frame.set_ethertype(EthernetProtocol::Arp);
+
+                    arp_repr.emit(&mut ArpPacket::new_unchecked(frame.payload_mut()))
+                })?;
+            }
+
+            #[cfg(feature = "proto-ipv6")]
+            (&IpAddress::Ipv6(src_addr), IpAddress::Ipv6(dst_addr)) => {
+                net_debug!(
+                    "address {} not in neighbor cache, sending Neighbor Solicitation",
+                    dst_addr
+                );
+
+                let solicit = Icmpv6Repr::Ndisc(NdiscRepr::NeighborSolicit {
+                    target_addr: dst_addr,
+                    lladdr: Some(self.hardware_addr.unwrap().into()),
+                });
+
+                let packet = IpPacket::Icmpv6((
+                    Ipv6Repr {
+                        src_addr,
+                        dst_addr: dst_addr.solicited_node(),
+                        next_header: IpProtocol::Icmpv6,
+                        payload_len: solicit.buffer_len(),
+                        hop_limit: 0xff,
+                    },
+                    solicit,
+                ));
+
+                self.dispatch_ip_pure(tx_token, packet)?;
+            }
+
+            _ => (),
+        }
+        // The request got dispatched, limit the rate on the cache.
+        self.neighbor_cache.as_mut().unwrap().limit_rate(self.now);
+        Err(Error::Unaddressable)
     }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -2553,6 +2719,60 @@ impl<'a> InterfaceInner<'a> {
             }
             #[cfg(feature = "medium-ieee802154")]
             Medium::Ieee802154 => self.dispatch_ieee802154(tx_token, packet),
+        }
+    }
+
+    #[cfg(feature = "ohua")]
+    fn dispatch_ip_pure<Tx: TxToken>(&self, tx_token: Tx, packet: IpPacket) -> Result<()> {
+        let ip_repr = packet.ip_repr().lower(&self.ip_addrs)?;
+
+        match self.caps.medium {
+            #[cfg(feature = "medium-ethernet")]
+            Medium::Ethernet => {
+                let (dst_hardware_addr, tx_token) = match self.lookup_hardware_addr_pure(
+                    tx_token,
+                    &ip_repr.src_addr(),
+                    &ip_repr.dst_addr(),
+                )? {
+                    (HardwareAddress::Ethernet(addr), tx_token) => (addr, tx_token),
+                    #[cfg(feature = "medium-ieee802154")]
+                    (HardwareAddress::Ieee802154(_), _) => unreachable!(),
+                };
+
+                let caps = self.caps.clone();
+                self.dispatch_ethernet(tx_token, ip_repr.total_len(), |mut frame| {
+                    frame.set_dst_addr(dst_hardware_addr);
+                    match ip_repr {
+                        #[cfg(feature = "proto-ipv4")]
+                        IpRepr::Ipv4(_) => frame.set_ethertype(EthernetProtocol::Ipv4),
+                        #[cfg(feature = "proto-ipv6")]
+                        IpRepr::Ipv6(_) => frame.set_ethertype(EthernetProtocol::Ipv6),
+                        _ => return,
+                    }
+
+                    ip_repr.emit(frame.payload_mut(), &caps.checksum);
+
+                    let payload = &mut frame.payload_mut()[ip_repr.buffer_len()..];
+                    packet.emit_payload(ip_repr, payload, &caps);
+                })
+            }
+            #[cfg(feature = "medium-ip")]
+            Medium::Ip => {
+                let tx_len = ip_repr.total_len();
+                tx_token.consume(self.now, tx_len, |mut tx_buffer| {
+                    debug_assert!(tx_buffer.as_ref().len() == tx_len);
+
+                    ip_repr.emit(&mut tx_buffer, &self.caps.checksum);
+
+                    let payload = &mut tx_buffer[ip_repr.buffer_len()..];
+                    packet.emit_payload(ip_repr, payload, &self.caps);
+
+                    Ok(())
+                })
+            }
+            _ => panic!("Unsupported dispatch_ip_pure")
+//            #[cfg(feature = "medium-ieee802154")]
+//            Medium::Ieee802154 => self.dispatch_ieee802154(tx_token, packet),
         }
     }
 
