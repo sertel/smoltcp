@@ -114,6 +114,25 @@ impl<'a> SocketSet<'a> {
         }
     }
 
+    pub fn size(&self) -> usize {
+        self.sockets.len()
+    }
+
+    pub fn remove_item(&mut self, handle: usize) -> Option<Item<'a>> {
+        net_trace!("[{}]: removing item", handle);
+        self.sockets[handle].inner.take()
+   }
+
+    pub fn insert(&mut self, handle: usize, item: Item<'a>) {
+        net_trace!("[{}]: inserting", handle);
+        match self.sockets[handle].inner {
+            Some(_) => panic!("handle is already occupied"),
+            None => { 
+                self.sockets[handle].inner.insert(item);
+            }
+        }
+    }
+
     /// Iterate every socket in this set.
     pub fn iter(&self) -> impl Iterator<Item = &Item<'a>> + '_ {
         self.sockets.iter().filter_map(|x| x.inner.as_ref())

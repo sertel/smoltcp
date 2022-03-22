@@ -2755,19 +2755,40 @@ impl<'a> TcpSocket<'a> {
         }
     }
 
-    #[cfg(feature = "ohua")]
-    pub(crate) fn dispatch_c(&'a mut self, cx: &Context, d: Call<'a>) -> Results<'a> {
-        match d {
-            Call::Pre => {
-                Results::Pre(self.dispatch_before(cx))
-            },
-            Call::Post(tcp_repr, is_keep_alive) => {
-                self.dispatch_after(cx, (tcp_repr, is_keep_alive));
-                Results::Post
-            }
+//    #[cfg(feature = "ohua")]
+//    pub(crate) fn dispatch_c(&'a mut self, cx: &Context, d: Call<'a>) -> Results<'a> {
+//        match d {
+//            Call::Pre => {
+//                Results::Pre(self.dispatch_before(cx))
+//            },
+//            Call::Post(tcp_repr, is_keep_alive) => {
+//                self.dispatch_after(cx, (tcp_repr, is_keep_alive));
+//                Results::Post
+//            }
+//        }
+//    }
+}
+
+
+// TODO What is the proper way to make this work without explicitly threading the socket?
+// The problem was that this function require an explict lifetime of 'a for the mutable borrow:
+// pub(crate) fn dispatch_c<'a>(socket: &'a mut TcpSocket<'a>, cx: &Context, d: Call<'a>) -> Results<'a> 
+// As a result, in the code that calls this function, I could not pass the borrowed socket on to
+// the recursive call.
+// I couldn't even get it fixed when state threading:
+// I suppose the only way to fix this would be to completely remove the borrowing.
+#[cfg(feature = "ohua")]
+pub fn dispatch_c<'a>(mut socket: TcpSocket<'a>, cx: &Context, d: Call) -> (TcpSocket<'a>, Results<'a>) {
+    match d {
+        Call::Pre => {
+            let r = Results::Pre(socket.dispatch_before(cx));
+            (socket, r)
+        },
+        Call::Post(tcp_repr, is_keep_alive) => {
+            socket.dispatch_after(cx, (tcp_repr, is_keep_alive));
+            (socket, Results::Post)
         }
     }
-
 }
 
 #[cfg(feature = "ohua")]

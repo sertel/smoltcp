@@ -5,9 +5,12 @@
 use core::cmp;
 use managed::{ManagedMap, ManagedSlice};
 
-use super::socket_set::SocketSet;
 #[cfg(feature = "ohua")]
 use super::socket_meta::Meta;
+#[cfg(feature = "ohua")]
+use super::socket_set::Item;
+
+use super::socket_set::SocketSet;
 use super::{SocketHandle, SocketStorage};
 use crate::iface::Routes;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -971,103 +974,58 @@ where
 
     #[cfg(feature = "ohua")]
     fn socket_egress_tcp(&'a mut self) -> Result<bool> {
-        let mut inner = &self.inner;
+        let inner = &self.inner;
         let device = &mut self.device;
         let sockets = &mut self.sockets;
 
         let mut emitted_any = false;
-        //        let permitted_sockets =
-        //            sockets.
-        //            iter_mut().
-        //            filter(|item|
-        //                   item
-        //                   .meta
-        //                   .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)));
-        for item in sockets.iter_mut() {
-            if !item
-                .meta
-                .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
-            {
-                continue;
-            }
-            match &mut item.socket {
-                #[cfg(feature = "socket-tcp")]
-                Socket::Tcp(tcp_socket) => {
-                    // TODO acquire ownership of the socket. (needs an additional heap allocation)
-                    let res = self.go(inner, device, &mut item.meta, Call::Pre, tcp_socket);
-                    match res {
-                        Ok((tcp_socketp, emitted, true)) => {
-                            // TODO add the socket back into the set of socket
-                            emitted_any = emitted_any || emitted;
+        for i in 0..sockets.size() {
+            let handle = i;
+            match sockets.remove_item(handle) {
+                None => (), // Can't take out a none.
+                Some(mut item) => {
+                    if item
+                        .meta
+                        .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
+                    {
+                        match item.socket {
+                            #[cfg(feature = "socket-tcp")]
+                            Socket::Tcp(tcp_socket) => {
+                                let res = go(inner, device, &mut item.meta, Call::Pre, tcp_socket);
+                                match res {
+                                    Ok((tcp_socketp, emitted, true)) => {
+                                        emitted_any = emitted_any || emitted;
+                                        sockets.insert(
+                                            handle,
+                                            Item {
+                                                meta: item.meta,
+                                                socket: Socket::Tcp(tcp_socketp),
+                                            },
+                                        );
+                                    }
+                                    Ok((tcp_socketp, _, false)) => {
+                                        sockets.insert(
+                                            handle,
+                                            Item {
+                                                meta: item.meta,
+                                                socket: Socket::Tcp(tcp_socketp),
+                                            },
+                                        );
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        // TODO sockets.insert(handle, item); // FIXME what about the state changes?!
+                                        return Err(err);
+                                    }
+                                }
+                            }
+                            _ => panic!("Only TCP sockets supported!"),
                         }
-                        Ok((tcp_socketp, emitted, false)) => {
-                            // TODO add the socket back into the set of sockets
-                            break;
-                        }
-                        Err(err) => return Err(err),
                     }
                 }
-                _ => panic!("Only TCP sockets supported!"),
             }
         }
         Ok(emitted_any)
-    }
-
-    fn go(
-        &self,
-        inner: &'a InterfaceInner<'a>,
-        device: &mut DeviceT,
-        meta: &mut Meta, // meta data external to the socket impl.(neighbor_cache)
-        d: Call<'a>,
-        tcp_socket: TcpSocket<'a>,
-    ) -> Result<(TcpSocket<'a>, bool, bool)> {
-        match tcp_socket.dispatch_c(inner, d) {
-            Results::Pre(pre_result) => match pre_result {
-                Ok((ip_repr, tcp_repr, is_keep_alive)) => {
-                    let neighbor_addr = Some(ip_repr.dst_addr());
-                    match socket_egress_tcp_device(inner, device, (ip_repr, tcp_repr)) {
-                        Ok(()) => 
-                            self.go(
-                                inner, 
-                                device,
-                                meta,
-                                Call::Post(tcp_repr, is_keep_alive), 
-                                tcp_socket),
-                        Err(Error::Exhausted) => 
-                            Ok((tcp_socket, false, false)), // nowhere to transmit
-                        Err(Error::Unaddressable) => {
-                            // `NeighborCache` already takes care of rate limiting the neighbor discovery
-                            // requests from the socket. However, without an additional rate limiting
-                            // mechanism, we would spin on every socket that has yet to discover its
-                            // neighboor.
-                            meta.neighbor_missing(
-                                inner.now,
-                                neighbor_addr.expect("non-IP response packet"),
-                            );
-                            Ok((tcp_socket, false, false))
-                        }
-                        Err(err) => {
-                            net_debug!(
-                                "{}: cannot dispatch egress packet: {}",
-                                meta.handle,
-                                err
-                            );
-                            Err(err)
-                        }
-                    }
-                }
-                Err(Error::Exhausted) => Ok((tcp_socket, false, true)), // nothing to transmit
-                Err(err) => {
-                    net_debug!(
-                        "{}: cannot dispatch egress packet: {}",
-                        meta.handle,
-                        err
-                    );
-                    Err(err)
-                }
-            },
-            Results::Post => Ok((tcp_socket, true, true)), // emitted_any = true
-        }
     }
 
     /// Depending on `igmp_report_state` and the therein contained
@@ -1128,6 +1086,58 @@ where
             }
             _ => Ok(false),
         }
+    }
+}
+
+#[cfg(feature = "ohua")]
+fn go<'a, DeviceT>(
+    inner: &'a InterfaceInner<'a>,
+    device: &mut DeviceT,
+    meta: &mut Meta, // meta data external to the socket impl.(neighbor_cache)
+    d: Call<'a>,
+    socket0: TcpSocket<'a>,
+) -> Result<(TcpSocket<'a>, bool, bool)>
+where
+    DeviceT: for<'d> Device<'d>,
+{
+    let (socket1, res) = dispatch_c(socket0, inner, d);
+    match res {
+        Results::Pre(pre_result) => match pre_result {
+            Ok((ip_repr, tcp_repr, is_keep_alive)) => {
+                let neighbor_addr = Some(ip_repr.dst_addr());
+                match socket_egress_tcp_device(inner, device, (ip_repr, tcp_repr)) {
+                    Ok(()) => go(
+                        inner,
+                        device,
+                        meta,
+                        Call::Post(tcp_repr, is_keep_alive),
+                        socket1,
+                    ),
+                    Err(Error::Exhausted) => Ok((socket1, false, false)), // nowhere to transmit
+                    Err(Error::Unaddressable) => {
+                        // `NeighborCache` already takes care of rate limiting the neighbor discovery
+                        // requests from the socket. However, without an additional rate limiting
+                        // mechanism, we would spin on every socket that has yet to discover its
+                        // neighboor.
+                        meta.neighbor_missing(
+                            inner.now,
+                            neighbor_addr.expect("non-IP response packet"),
+                        );
+                        Ok((socket1, false, false))
+                    }
+                    Err(err) => {
+                        net_debug!("{}: cannot dispatch egress packet: {}", meta.handle, err);
+                        Err(err)
+                    }
+                }
+            }
+            Err(Error::Exhausted) => Ok((socket1, false, true)), // nothing to transmit
+            Err(err) => {
+                net_debug!("{}: cannot dispatch egress packet: {}", meta.handle, err);
+                Err(err)
+            }
+        },
+        Results::Post => Ok((socket1, true, true)), // emitted_any = true
     }
 }
 
