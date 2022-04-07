@@ -72,6 +72,16 @@ macro_rules! let_mut_field {
     };
 }
 
+#[cfg(feature = "ohua")]
+macro_rules! assert_none {
+    ($e:expr) => {
+        match $e {
+            None => (),
+            _ => panic!("Expected None value for stolen field but found value!")
+        }
+    };
+}
+
 /// The device independent part of an Ethernet network interface.
 ///
 /// Separating the device from the data required for prorcessing and dispatching makes
@@ -1056,17 +1066,20 @@ where
     }
 
     #[cfg(feature = "ohua")]
+    #[allow(dead_code)]
     fn socket_egress_tcp(&'a mut self) -> Result<bool> {
-        let inner = self.inner.take().unwrap();
-        let device = self.device.take().unwrap();
-        let sockets = &mut self.sockets;
+       let sockets = &mut self.sockets;
 
         let mut emitted_any = false;
-        for i in 0..sockets.size() {
-            let handle = i;
-            match sockets.remove_item(handle) {
+        for handle in 0..sockets.size() {
+           match sockets.remove_item(handle) {
+
                 None => (), // Can't take out a none.
                 Some(mut item) => {
+                    // steal/borrow
+                    let inner = self.inner.take().unwrap();
+                    let device = self.device.take().unwrap();
+                    
                     if item
                         .meta
                         .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
@@ -1074,30 +1087,30 @@ where
                         match item.socket {
                             #[cfg(feature = "socket-tcp")]
                             Socket::Tcp(tcp_socket) => {
-                                let res = go(inner, device, item.meta, Call::Pre(socket_egress_tcp_ip), tcp_socket);
+
+                                let (innerp, devicep, metap, socketp, res) = 
+                                    go(inner, device, item.meta, Call::Pre(socket_egress_tcp_ip), tcp_socket);
+
+                                // return what we have stolen/borrowed
+                                sockets.insert(
+                                    handle,
+                                    Item {
+                                        meta: metap,
+                                        socket: Socket::Tcp(socketp),
+                                    });
+                                let x = self.device.replace(devicep);
+                                assert_none!(x);
+                                let y = self.inner.replace(innerp);
+                                assert_none!(y);
                                 match res {
-                                    Ok((tcp_socketp, emitted, true)) => {
+                                    Ok((emitted, true)) => {
                                         emitted_any = emitted_any || emitted;
-                                        sockets.insert(
-                                            handle,
-                                            Item {
-                                                meta: item.meta,
-                                                socket: Socket::Tcp(tcp_socketp),
-                                            },
-                                        );
                                     }
-                                    Ok((tcp_socketp, _, false)) => {
-                                        sockets.insert(
-                                            handle,
-                                            Item {
-                                                meta: item.meta,
-                                                socket: Socket::Tcp(tcp_socketp),
-                                            },
-                                        );
+                                    Ok((_, false)) => {
                                         break;
                                     }
                                     Err(err) => {
-                                        // TODO sockets.insert(handle, item); // FIXME what about the state changes?!
+                                        // FIXME what about the state changes?!
                                         return Err(err);
                                     }
                                 }
@@ -1105,12 +1118,17 @@ where
                             _ => panic!("Only TCP sockets supported!"),
                         }
                     }
+                    else {
+                        // return what we have stolen/borrowed
+                        let x = self.device.replace(device);
+                        assert_none!(x);
+                        let y = self.inner.replace(inner);
+                        assert_none!(y);
+                    }
                 }
             }
         }
-        self.device.insert(device);
-        self.inner.insert(inner);
-        Ok(emitted_any)
+       Ok(emitted_any)
     }
 
     /// Depending on `igmp_report_state` and the therein contained
@@ -1178,12 +1196,12 @@ where
 
 #[cfg(feature = "ohua")]
 fn go<'a, DeviceT>(
-    mut inner: InterfaceInner,
+    mut inner: InterfaceInner<'a>,
     mut device: DeviceT,
     mut meta: Meta, // meta data external to the socket impl.(neighbor_cache)
     d: Call,
     mut socket: TcpSocket<'a>,
-) -> Result<(TcpSocket<'a>, bool, bool)>
+) -> (InterfaceInner<'a>, DeviceT, Meta, TcpSocket<'a>, Result<(bool, bool)>)
 where
     DeviceT: for<'d> Device<'d>,
 {
@@ -1200,7 +1218,8 @@ where
                         Call::Post(tcp_repr_p, is_keep_alive),
                         socket,
                     ),
-                    Err(Error::Exhausted) => Ok((socket, false, false)), // nowhere to transmit
+                    Err(Error::Exhausted) => (inner, device, meta, socket, 
+                        Ok((false, false))), // nowhere to transmit
                     Err(Error::Unaddressable) => {
                         // `NeighborCache` already takes care of rate limiting the neighbor discovery
                         // requests from the socket. However, without an additional rate limiting
@@ -1210,21 +1229,26 @@ where
                             inner.now,
                             neighbor_addr.expect("non-IP response packet"),
                         );
-                        Ok((socket, false, false))
+                        (inner, device, meta, socket, Ok((false, false)))
                     }
                     Err(err) => {
                         net_debug!("{}: cannot dispatch egress packet: {}", meta.handle, err);
-                        Err(err)
+                        (inner, device, meta, socket, 
+                         Err(err))
                     }
                 }
             }
-            Err(Error::Exhausted) => Ok((socket, false, true)), // nothing to transmit
+            Err(Error::Exhausted) => (inner, device, meta, socket,
+                 Ok((false, true))), // nothing to transmit
             Err(err) => {
                 net_debug!("{}: cannot dispatch egress packet: {}", meta.handle, err);
-                Err(err)
+                (inner, device, meta, socket, 
+                 Err(err))
             }
         },
-        Results::Post => Ok((socket, true, true)), // emitted_any = true
+        Results::Post => 
+                (inner, device, meta, socket, 
+            Ok((true, true))), // emitted_any = true
     }
 }
 
@@ -1295,7 +1319,7 @@ fn socket_egress_tcp_device<'a, DeviceT: for<'d> Device<'d>>(
         // but it is the only reason for sharing `inner`
         inner.now, // the timestamp is actually not used
         tx_len,
-        |mut tx_buffer| { // sadly: instead of just taking this buffer, the RawSocket will create its own.
+        |tx_buffer| { // sadly: instead of just taking this buffer, the RawSocket will create its own.
             debug_assert!(tx_buffer.as_ref().len() == tx_len);
             // all we need to do is copy over the data
             // FIXME don't copy. just move

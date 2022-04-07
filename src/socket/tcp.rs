@@ -2659,6 +2659,7 @@ impl<'a> TcpSocket<'a> {
     }
 
     #[cfg(feature = "ohua")]
+    #[allow(dead_code)] // the normal interface from the original code
     pub(crate) fn dispatch_device<F>(
         &mut self, cx: &mut Context, (ip_repr,repr):(IpRepr,TcpRepr), emit: F
     ) -> Result<()>

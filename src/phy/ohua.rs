@@ -8,7 +8,7 @@ pub struct OhuaSocket{
   pub data : Rc<RefCell<Option<Vec<u8>>>>
 }
 
-struct RxToken{}
+pub struct RxToken{}
 pub struct TxToken{
   pub data : Rc<RefCell<Option<Vec<u8>>>>
 }
@@ -57,7 +57,10 @@ impl phy::TxToken for TxToken {
         // TODO just reuse the buffer.
         let mut buffer = vec![0; len];
         let result = f(&mut buffer);
-        self.data.borrow_mut().insert(buffer);
+        match self.data.borrow_mut().replace(buffer) {
+            None => (),
+            _ => panic!("There was another value in the buffer.")
+        }
         result // we need to return the result here already. the code around needs to take care of it.
     }
 }

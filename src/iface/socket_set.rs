@@ -128,7 +128,7 @@ impl<'a> SocketSet<'a> {
         match self.sockets[handle].inner {
             Some(_) => panic!("handle is already occupied"),
             None => { 
-                self.sockets[handle].inner.insert(item);
+                let _ = self.sockets[handle].inner.replace(item);
             }
         }
     }
