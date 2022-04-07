@@ -3015,7 +3015,7 @@ mod test {
     #[cfg(feature = "proto-igmp")]
     fn recv_all(iface: &mut Interface<'_, Loopback>, timestamp: Instant) -> Vec<Vec<u8>> {
         let mut pkts = Vec::new();
-        while let Some((rx, _tx)) = iface.device.receive() {
+        while let Some((rx, _tx)) = iface.device_mut().receive() {
             rx.consume(timestamp, |pkt| {
                 pkts.push(pkt.to_vec());
                 Ok(())
@@ -3070,10 +3070,12 @@ mod test {
         // Ensure that the unknown protocol frame does not trigger an
         // ICMP error response when the destination address is a
         // broadcast address
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_ipv4(&mut iface.sockets, &frame),
+            inner.process_ipv4(&mut iface.sockets, &frame),
             Ok(None)
-        );
+        )
+        )
     }
 
     #[test]
@@ -3101,10 +3103,12 @@ mod test {
         // Ensure that the unknown protocol frame does not trigger an
         // ICMP error response when the destination address is a
         // broadcast address
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_ipv6(&mut iface.sockets, &frame),
+            inner.process_ipv6(&mut iface.sockets, &frame),
             Ok(None)
-        );
+        )
+        )
     }
 
     #[test]
@@ -3153,10 +3157,12 @@ mod test {
 
         // Ensure that the unknown protocol triggers an error response.
         // And we correctly handle no payload.
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_ipv4(&mut iface.sockets, &frame),
+            inner.process_ipv4(&mut iface.sockets, &frame),
             Ok(Some(expected_repr))
-        );
+        )
+        )
     }
 
     #[test]
@@ -3170,10 +3176,10 @@ mod test {
         });
 
         assert!(iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 168, 1, 255])),);
         assert!(!iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 168, 1, 254])),);
 
         iface.update_ip_addrs(|addrs| {
@@ -3182,16 +3188,16 @@ mod test {
             });
         });
         assert!(!iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 168, 23, 255])),);
         assert!(!iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 168, 23, 254])),);
         assert!(!iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 168, 255, 254])),);
         assert!(iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 168, 255, 255])),);
 
         iface.update_ip_addrs(|addrs| {
@@ -3200,16 +3206,16 @@ mod test {
             });
         });
         assert!(!iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 23, 1, 255])),);
         assert!(!iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 23, 1, 254])),);
         assert!(!iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 255, 255, 254])),);
         assert!(iface
-            .inner
+            .inner()
             .is_subnet_broadcast(Ipv4Address([192, 255, 255, 255])),);
     }
 
@@ -3277,11 +3283,12 @@ mod test {
 
         // Ensure that the unknown protocol triggers an error response.
         // And we correctly handle no payload.
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_udp(&mut iface.sockets, ip_repr, false, data),
             Ok(Some(expected_repr))
+        )
         );
 
         let ip_repr = IpRepr::Ipv4(Ipv4Repr {
@@ -3305,14 +3312,16 @@ mod test {
         // Ensure that the port unreachable error does not trigger an
         // ICMP error response when the destination address is a
         // broadcast address and no socket is bound to the port.
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_udp(
+            inner.process_udp(
                 &mut iface.sockets,
                 ip_repr,
                 false,
                 packet_broadcast.into_inner()
             ),
             Ok(None)
+        )
         );
     }
 
@@ -3379,11 +3388,12 @@ mod test {
         );
 
         // Packet should be handled by bound UDP socket
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_udp(&mut iface.sockets, ip_repr, false, packet.into_inner()),
             Ok(None)
+        )
         );
 
         // Make sure the payload to the UDP packet processed by process_udp is
@@ -3452,9 +3462,11 @@ mod test {
         };
         let expected_packet = IpPacket::Icmpv4((expected_ipv4_repr, expected_icmpv4_repr));
 
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_ipv4(&mut iface.sockets, &frame),
+            inner.process_ipv4(&mut iface.sockets, &frame),
             Ok(Some(expected_packet))
+        )
         );
     }
 
@@ -3562,24 +3574,26 @@ mod test {
         );
         // The expected packet and the generated packet are equal
         #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
+        let_mut_field!(iface.inner, 
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_udp(&mut iface.sockets, ip_repr.into(), false, payload),
             Ok(Some(IpPacket::Icmpv4((
                 expected_ip_repr,
                 expected_icmp_repr
             ))))
+        )
         );
         #[cfg(feature = "proto-ipv6")]
+        let_mut_field!(iface.inner, 
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_udp(&mut iface.sockets, ip_repr.into(), false, payload),
             Ok(Some(IpPacket::Icmpv6((
                 expected_ip_repr,
                 expected_icmp_repr
             ))))
+        )
         );
     }
 
@@ -3611,9 +3625,9 @@ mod test {
         repr.emit(&mut packet);
 
         // Ensure an ARP Request for us triggers an ARP Reply
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_ethernet(&mut iface.sockets, frame.into_inner()),
             Ok(Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Reply,
@@ -3622,16 +3636,19 @@ mod test {
                 target_hardware_addr: remote_hw_addr,
                 target_protocol_addr: remote_ip_addr
             })))
+        )
         );
 
         // Ensure the address of the requestor was entered in the cache
+        let_mut_field!(iface.inner, 
         assert_eq!(
-            iface.inner.lookup_hardware_addr(
+            inner.lookup_hardware_addr(
                 MockTxToken,
                 &IpAddress::Ipv4(local_ip_addr),
                 &IpAddress::Ipv4(remote_ip_addr)
             ),
             Ok((HardwareAddress::Ethernet(remote_hw_addr), MockTxToken))
+        )
         );
     }
 
@@ -3686,24 +3703,27 @@ mod test {
         };
 
         // Ensure an Neighbor Solicitation triggers a Neighbor Advertisement
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_ethernet(&mut iface.sockets, frame.into_inner()),
             Ok(Some(EthernetPacket::Ip(IpPacket::Icmpv6((
                 ipv6_expected,
                 icmpv6_expected
             )))))
+        )
         );
 
         // Ensure the address of the requestor was entered in the cache
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.lookup_hardware_addr(
+            inner.lookup_hardware_addr(
                 MockTxToken,
                 &IpAddress::Ipv6(local_ip_addr),
                 &IpAddress::Ipv6(remote_ip_addr)
             ),
             Ok((HardwareAddress::Ethernet(remote_hw_addr), MockTxToken))
+        )
         );
     }
 
@@ -3733,21 +3753,24 @@ mod test {
         repr.emit(&mut packet);
 
         // Ensure an ARP Request for someone else does not trigger an ARP Reply
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_ethernet(&mut iface.sockets, frame.into_inner()),
             Ok(None)
+        )
         );
 
         // Ensure the address of the requestor was NOT entered in the cache
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.lookup_hardware_addr(
+            inner.lookup_hardware_addr(
                 MockTxToken,
                 &IpAddress::Ipv4(Ipv4Address([0x7f, 0x00, 0x00, 0x01])),
                 &IpAddress::Ipv4(remote_ip_addr)
             ),
             Err(Error::Unaddressable)
+        )
         );
     }
 
@@ -3781,9 +3804,9 @@ mod test {
         }
 
         // Ensure an ARP Request for us triggers an ARP Reply
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_ethernet(&mut iface.sockets, frame.into_inner()),
             Ok(Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Reply,
@@ -3792,16 +3815,19 @@ mod test {
                 target_hardware_addr: remote_hw_addr,
                 target_protocol_addr: remote_ip_addr
             })))
+        )
         );
 
         // Ensure the address of the requestor was entered in the cache
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.lookup_hardware_addr(
+            inner.lookup_hardware_addr(
                 MockTxToken,
                 &IpAddress::Ipv4(local_ip_addr),
                 &IpAddress::Ipv4(remote_ip_addr)
             ),
             Ok((HardwareAddress::Ethernet(remote_hw_addr), MockTxToken))
+        )
         );
 
         // Update IP addrs to trigger ARP cache flush
@@ -3813,7 +3839,7 @@ mod test {
         });
 
         // ARP cache flush after address change
-        assert!(!iface.inner.has_neighbor(&IpAddress::Ipv4(remote_ip_addr)));
+        assert!(!iface.inner().has_neighbor(&IpAddress::Ipv4(remote_ip_addr)));
     }
 
     #[test]
@@ -3874,11 +3900,12 @@ mod test {
             dst_addr: ipv4_repr.src_addr,
             ..ipv4_repr
         };
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface
-                .inner
+            inner
                 .process_icmpv4(&mut iface.sockets, ip_repr, icmp_data),
             Ok(Some(IpPacket::Icmpv4((ipv4_reply, echo_reply))))
+        )
         );
 
         let socket = iface.get_socket::<IcmpSocket>(socket_handle);
@@ -3905,13 +3932,13 @@ mod test {
             *addrs = From::from(new_addrs);
         });
         assert!(iface
-            .inner
+            .inner()
             .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002)));
         assert!(iface
-            .inner
+            .inner()
             .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0xffff)));
         assert!(!iface
-            .inner
+            .inner()
             .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0003)));
     }
 
@@ -3972,9 +3999,11 @@ mod test {
 
         // Ensure the unknown next header causes a ICMPv6 Parameter Problem
         // error message to be sent to the sender.
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_ipv6(&mut iface.sockets, &frame),
+            inner.process_ipv6(&mut iface.sockets, &frame),
             Ok(Some(IpPacket::Icmpv6((reply_ipv6_repr, reply_icmp_repr))))
+        )
         );
     }
 
@@ -3985,7 +4014,7 @@ mod test {
             iface: &mut Interface<'_, Loopback>,
             timestamp: Instant,
         ) -> Vec<(Ipv4Repr, IgmpRepr)> {
-            let caps = iface.device.capabilities();
+            let caps = iface.device().capabilities();
             let checksum_caps = &caps.checksum;
             recv_all(iface, timestamp)
                 .iter()
@@ -4047,7 +4076,7 @@ mod test {
         ];
         {
             // Transmit GENERAL_QUERY_BYTES into loopback
-            let tx_token = iface.device.transmit().unwrap();
+            let tx_token = iface.device_mut().transmit().unwrap();
             tx_token
                 .consume(timestamp, GENERAL_QUERY_BYTES.len(), |buffer| {
                     buffer.copy_from_slice(GENERAL_QUERY_BYTES);
@@ -4139,9 +4168,11 @@ mod test {
             Ipv4Packet::new_unchecked(&bytes)
         };
 
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_ipv4(&mut iface.sockets, &frame),
+            inner.process_ipv4(&mut iface.sockets, &frame),
             Ok(None)
+        )
         );
     }
 
@@ -4208,8 +4239,10 @@ mod test {
             );
             Ipv4Packet::new_unchecked(&bytes)
         };
-
-        let frame = iface.inner.process_ipv4(&mut iface.sockets, &frame);
+        
+        let frame = let_mut_field!(iface.inner,
+            inner.process_ipv4(&mut iface.sockets, &frame)
+        );
 
         // because the packet could not be handled we should send an Icmp message
         assert!(match frame {
@@ -4301,9 +4334,11 @@ mod test {
             Ipv4Packet::new_unchecked(&bytes)
         };
 
+        let_mut_field!(iface.inner,
         assert_eq!(
-            iface.inner.process_ipv4(&mut iface.sockets, &frame),
+            inner.process_ipv4(&mut iface.sockets, &frame),
             Ok(None)
+        )
         );
 
         // Make sure the UDP socket can still receive in presence of a Raw socket that handles UDP
