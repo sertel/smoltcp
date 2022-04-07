@@ -105,6 +105,8 @@ mod loopback;
 mod pcap_writer;
 #[cfg(all(feature = "phy-raw_socket", unix))]
 mod raw_socket;
+#[cfg(feature = "ohua")]
+mod ohua;
 mod tracer;
 #[cfg(all(
     feature = "phy-tuntap_interface",
@@ -125,6 +127,8 @@ pub use self::loopback::Loopback;
 pub use self::pcap_writer::{PcapLinkType, PcapMode, PcapSink, PcapWriter};
 #[cfg(all(feature = "phy-raw_socket", unix))]
 pub use self::raw_socket::RawSocket;
+#[cfg(feature = "ohua")]
+pub use self::ohua::OhuaSocket;
 pub use self::tracer::Tracer;
 #[cfg(all(
     feature = "phy-tuntap_interface",

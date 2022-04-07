@@ -37,7 +37,7 @@ pub use self::raw::{RawPacketMetadata, RawSocket, RawSocketBuffer};
 #[cfg(feature = "socket-tcp")]
 pub use self::tcp::{SocketBuffer as TcpSocketBuffer, State as TcpState, TcpSocket};
 #[cfg(feature="ohua")]
-pub use self::tcp::{Call, Results, dispatch_c};
+pub use self::tcp::{Call, Results};
 #[cfg(feature = "socket-udp")]
 pub use self::udp::{UdpPacketMetadata, UdpSocket, UdpSocketBuffer};
 

@@ -987,6 +987,79 @@ impl<'a> Repr<'a> {
     }
 }
 
+/// A borrow-free representation.
+/// Note: This also makes for a good design:
+/// Separate all non-borrow functions from the borrowed part,
+/// because the non-borrow part is much easier to deal with
+/// and share.
+#[cfg(feature = "ohua")]
+pub struct ReprP {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub control: Control,
+    pub seq_number: SeqNumber,
+    pub ack_number: Option<SeqNumber>,
+    pub window_len: u16,
+    pub window_scale: Option<u8>,
+    pub max_seg_size: Option<u16>,
+    pub sack_permitted: bool,
+    pub sack_ranges: [Option<(u32, u32)>; 3],
+    pub payload_len: usize
+}
+
+#[cfg(feature = "ohua")]
+impl ReprP {
+    pub fn from<'a>(tcp_repr: Repr<'a>) -> Self {
+        ReprP {
+            src_port : tcp_repr.src_port,
+            dst_port : tcp_repr.dst_port,
+            control : tcp_repr.control,
+            seq_number : tcp_repr.seq_number,
+            ack_number : tcp_repr.ack_number,
+            window_len : tcp_repr.window_len,
+            window_scale : tcp_repr.window_scale,
+            max_seg_size : tcp_repr.max_seg_size,
+            sack_permitted : tcp_repr.sack_permitted,
+            sack_ranges : tcp_repr.sack_ranges,
+            payload_len : tcp_repr.payload.len()
+        }
+    }
+
+    pub fn segment_len(&self) -> usize {
+        self.payload_len + self.control.len()
+    }
+
+    pub fn header_len(&self) -> usize {
+        let mut length = field::URGENT.end;
+        if self.max_seg_size.is_some() {
+            length += 4
+        }
+        if self.window_scale.is_some() {
+            length += 3
+        }
+        if self.sack_permitted {
+            length += 2;
+        }
+        let sack_range_len: usize = self
+            .sack_ranges
+            .iter()
+            .map(|o| o.map(|_| 8).unwrap_or(0))
+            .sum();
+        if sack_range_len > 0 {
+            length += sack_range_len + 2;
+        }
+        if length % 4 != 0 {
+            length += 4 - length % 4;
+        }
+        length
+    }
+
+    pub fn buffer_len(&self) -> usize {
+        self.header_len() + self.payload_len
+    }
+}
+
+
 impl<'a, T: AsRef<[u8]> + ?Sized> fmt::Display for Packet<&'a T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Cannot use Repr::parse because we don't have the IP addresses.

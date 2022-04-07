@@ -14,6 +14,8 @@ use crate::time::{Duration, Instant};
 use crate::wire::{
     IpAddress, IpEndpoint, IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber, TCP_HEADER_LEN,
 };
+#[cfg(feature = "ohua")]
+use crate::wire::TcpReprP;
 use crate::{Error, Result};
 
 /// A TCP socket ring buffer.
@@ -2370,7 +2372,7 @@ impl<'a> TcpSocket<'a> {
     #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_before(
         &mut self, cx: &Context
-    ) -> Result<(IpRepr, TcpRepr, bool)>
+    ) -> Result<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
     {
         if !self.remote_endpoint.is_specified() {
             return Err(Error::Exhausted);
@@ -2640,7 +2642,20 @@ impl<'a> TcpSocket<'a> {
         // to not waste time waiting for the retransmit timer on packets that we know
         // for sure will not be successfully transmitted.
         ip_repr.set_payload_len(repr.buffer_len());
-        Ok((ip_repr, repr, is_keep_alive))
+
+        // according to the call above, the payload should be set at this point
+        // and we can readily derive a TcpReprP.
+        let ip_repr_c = ip_repr.clone();
+        let tcp_repr = TcpReprP::from(repr);
+        Ok(
+            ((ip_repr, repr)
+            ,(
+                tcp_repr,
+                ip_repr_c,
+                is_keep_alive
+                )
+            )
+        )
     }
 
     #[cfg(feature = "ohua")]
@@ -2657,7 +2672,7 @@ impl<'a> TcpSocket<'a> {
     pub(crate) fn dispatch_after(
         &mut self,
         cx: &Context,
-        (repr, is_keep_alive): (TcpRepr, bool)
+        (repr, is_keep_alive): (TcpReprP, bool)
     )
     {
         // We've sent something, whether useful data or a keep-alive packet, so rewind
@@ -2755,18 +2770,26 @@ impl<'a> TcpSocket<'a> {
         }
     }
 
-//    #[cfg(feature = "ohua")]
-//    pub(crate) fn dispatch_c(&'a mut self, cx: &Context, d: Call<'a>) -> Results<'a> {
-//        match d {
-//            Call::Pre => {
-//                Results::Pre(self.dispatch_before(cx))
-//            },
-//            Call::Post(tcp_repr, is_keep_alive) => {
-//                self.dispatch_after(cx, (tcp_repr, is_keep_alive));
-//                Results::Post
-//            }
-//        }
-//    }
+    #[cfg(feature = "ohua")]
+    pub(crate) fn dispatch_c(&mut self, cx: &mut Context, d: Call) -> Results {
+        match d {
+            Call::Pre(emit) => 
+                Results::Pre(
+                    // monadic programming in Rust
+                    // to me this is absolutely weird: monadic programming facilitates imperative
+                    // programming but Rust is already an imperative langauage!
+                    self.dispatch_before(cx)
+                        .and_then(|(reprs,c)|{
+                            // and here is the according functor map
+                            emit(cx, reprs).map(|x| (x,c))
+                        })
+                ),
+            Call::Post(tcp_repr, is_keep_alive) => {
+                self.dispatch_after(cx, (tcp_repr, is_keep_alive));
+                Results::Post
+            }
+        }
+    }
 }
 
 
@@ -2777,31 +2800,29 @@ impl<'a> TcpSocket<'a> {
 // the recursive call.
 // I couldn't even get it fixed when state threading:
 // I suppose the only way to fix this would be to completely remove the borrowing.
-#[cfg(feature = "ohua")]
-pub fn dispatch_c<'a>(mut socket: TcpSocket<'a>, cx: &Context, d: Call) -> (TcpSocket<'a>, Results<'a>) {
-    match d {
-        Call::Pre => {
-            let r = Results::Pre(socket.dispatch_before(cx));
-            (socket, r)
-        },
-        Call::Post(tcp_repr, is_keep_alive) => {
-            socket.dispatch_after(cx, (tcp_repr, is_keep_alive));
-            (socket, Results::Post)
-        }
-    }
-}
+// #[cfg(feature = "ohua")]
+// pub fn dispatch_c<'a>(socket:&'a mut TcpSocket<'a>, cx: &Context, d: Call) -> Results<'a> {
+//     match d {
+//         Call::Pre => Results::Pre(socket.dispatch_before(cx)),
+//         Call::Post(tcp_repr, is_keep_alive) => {
+//             socket.dispatch_after(cx, (tcp_repr, is_keep_alive));
+//             Results::Post
+//         }
+//     }
+// }
 
 #[cfg(feature = "ohua")]
-pub enum Results<'a> {
-    Pre(Result<(IpRepr, TcpRepr<'a>, bool)>),
+pub enum Results {
+    Pre(Result<(Vec<u8>, (TcpReprP,IpRepr, bool))>),
     Post
 }
 
 #[cfg(feature = "ohua")]
-pub enum Call<'a>{
-    Pre,
-    Post(TcpRepr<'a>, bool)
+pub enum Call {
+    Pre(fn(&mut Context, (IpRepr, TcpRepr)) -> Result<Vec<u8>>),
+    Post(TcpReprP, bool)
 }
+
 
 impl<'a> fmt::Write for TcpSocket<'a> {
     fn write_str(&mut self, slice: &str) -> fmt::Result {

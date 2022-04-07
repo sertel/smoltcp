@@ -235,6 +235,10 @@ pub use self::tcp::{
     TcpOption, HEADER_LEN as TCP_HEADER_LEN,
 };
 
+#[cfg(feature = "ohua")]
+pub use self::tcp::ReprP as TcpReprP;
+
+
 #[cfg(feature = "proto-dhcpv4")]
 pub use self::dhcpv4::{
     MessageType as DhcpMessageType, Packet as DhcpPacket, Repr as DhcpRepr,
