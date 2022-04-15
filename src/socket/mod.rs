@@ -21,7 +21,7 @@ mod icmp;
 #[cfg(feature = "socket-raw")]
 mod raw;
 #[cfg(feature = "socket-tcp")]
-mod tcp;
+pub(crate) mod tcp;
 #[cfg(feature = "socket-udp")]
 mod udp;
 

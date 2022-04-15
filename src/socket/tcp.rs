@@ -2142,6 +2142,9 @@ impl<'a> TcpSocket<'a> {
             return Err(Error::Exhausted);
         }
 
+        net_debug!("local: {:?}", &self.local_endpoint.addr);
+        net_debug!("remote: {:?}", &self.remote_endpoint.addr);
+
         // Construct the lowered IP representation.
         // We might need this to calculate the MSS, so do it early.
         let mut ip_repr = IpRepr::Unspecified {
@@ -2837,7 +2840,7 @@ impl<'a> fmt::Write for TcpSocket<'a> {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::wire::ip::test::{MOCK_IP_ADDR_1, MOCK_IP_ADDR_2, MOCK_IP_ADDR_3, MOCK_UNSPECIFIED};
     use crate::wire::{IpAddress, IpCidr, IpRepr};
@@ -2912,9 +2915,9 @@ mod test {
     // Helper functions
     // =========================================================================================//
 
-    struct TestSocket {
-        socket: TcpSocket<'static>,
-        cx: Context<'static>,
+    pub(crate) struct TestSocket {
+        pub(crate) socket: TcpSocket<'static>,
+        pub(crate) cx: Context<'static>,
     }
 
     impl Deref for TestSocket {
@@ -3044,16 +3047,25 @@ mod test {
         TestSocket { socket, cx }
     }
 
-    fn socket_syn_received_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+    fn socket_syn_received_with_buffer_sizes0(
+        tx_len: usize, 
+        rx_len: usize,
+        local: IpEndpoint,
+        remote: IpEndpoint) -> TestSocket {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
         s.state = State::SynReceived;
-        s.local_endpoint = LOCAL_END;
-        s.remote_endpoint = REMOTE_END;
+        s.local_endpoint = local;
+        s.remote_endpoint = remote;
         s.local_seq_no = LOCAL_SEQ;
         s.remote_seq_no = REMOTE_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ;
         s.remote_win_len = 256;
         s
+    }
+
+    fn socket_syn_received_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+        socket_syn_received_with_buffer_sizes0(
+            tx_len, rx_len, LOCAL_END, REMOTE_END)
     }
 
     fn socket_syn_received() -> TestSocket {
@@ -3084,8 +3096,14 @@ mod test {
         s
     }
 
-    fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
-        let mut s = socket_syn_received_with_buffer_sizes(tx_len, rx_len);
+    pub(crate) fn socket_established_with_buffer_sizes0(
+        tx_len: usize, 
+        rx_len: usize,
+        local: IpEndpoint,
+        remote: IpEndpoint) -> TestSocket {
+        let mut s = 
+            socket_syn_received_with_buffer_sizes0(
+                tx_len, rx_len, local, remote);
         s.state = State::Established;
         s.local_seq_no = LOCAL_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ + 1;
@@ -3094,9 +3112,20 @@ mod test {
         s
     }
 
-    fn socket_established() -> TestSocket {
+    pub(crate) fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+        socket_established_with_buffer_sizes0(
+            tx_len, rx_len, LOCAL_END, REMOTE_END)
+    }
+
+    pub(crate) fn socket_established_with_endpoints(
+        local: IpEndpoint, remote: IpEndpoint) -> TestSocket {
+        socket_established_with_buffer_sizes0(64, 64, local, remote)
+    }
+
+    pub(crate) fn socket_established() -> TestSocket {
         socket_established_with_buffer_sizes(64, 64)
     }
+
 
     fn socket_fin_wait_1() -> TestSocket {
         let mut s = socket_established();

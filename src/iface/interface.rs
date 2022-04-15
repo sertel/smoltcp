@@ -981,7 +981,7 @@ where
         let_mut_field!(self.device,
         let_mut_field!(self.inner,
             let _caps = device.capabilities();
-
+            
             let mut emitted_any = false;
             for item in sockets.iter_mut() {
                 if !item
@@ -2571,7 +2571,9 @@ impl<'a> InterfaceInner<'a> {
     where
         Tx: TxToken,
     {
+        net_debug!("lookup");
         if dst_addr.is_broadcast() {
+            net_debug!("found broadcast");
             let hardware_addr = match self.caps.medium {
                 #[cfg(feature = "medium-ethernet")]
                 Medium::Ethernet => HardwareAddress::Ethernet(EthernetAddress::BROADCAST),
@@ -2707,6 +2709,7 @@ impl<'a> InterfaceInner<'a> {
         match self.caps.medium {
             #[cfg(feature = "medium-ethernet")]
             Medium::Ethernet => {
+                net_debug!("looking up HW addr ...");
                 let (dst_hardware_addr, tx_token) = match self.lookup_hardware_addr(
                     tx_token,
                     &ip_repr.src_addr(),
@@ -2717,6 +2720,7 @@ impl<'a> InterfaceInner<'a> {
                     (HardwareAddress::Ieee802154(_), _) => unreachable!(),
                 };
 
+                net_debug!("done.");
                 let caps = self.caps.clone();
                 self.dispatch_ethernet(tx_token, ip_repr.total_len(), |mut frame| {
                     frame.set_dst_addr(dst_hardware_addr);
@@ -2739,7 +2743,7 @@ impl<'a> InterfaceInner<'a> {
                 let tx_len = ip_repr.total_len();
                 tx_token.consume(self.now, tx_len, |mut tx_buffer| {
                     debug_assert!(tx_buffer.as_ref().len() == tx_len);
-
+                    
                     ip_repr.emit(&mut tx_buffer, &self.caps.checksum);
 
                     let payload = &mut tx_buffer[ip_repr.buffer_len()..];
@@ -4349,4 +4353,47 @@ mod test {
             Ok((&UDP_PAYLOAD[..], IpEndpoint::new(src_addr.into(), 67)))
         );
     }
+
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp"))]
+    fn test_tcp_socket_egress() {
+        use crate::socket::TcpSocket;
+        use crate::socket::tcp::test::{
+            socket_established_with_endpoints, TestSocket};
+        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
+
+        //SmolTCP
+        let mut iface1 = create_loopback_ip();
+
+        let TestSocket{socket, cx} =
+            socket_established_with_endpoints(
+                // I could not enforce proto-ipv4
+                IpEndpoint{
+                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                    port: 80 
+                },
+                IpEndpoint {
+                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST), 
+                    port: 49500} );
+        iface1.inner = Some(cx);
+        let tcp_socket_handle1 = iface1.add_socket(socket);
+ 
+        let socket1 = iface1.get_socket::<TcpSocket>(tcp_socket_handle1);
+        assert!(!socket1.can_recv());
+        
+        assert!(socket1.may_send());
+        assert!(socket1.can_send());
+    
+        let msg = "hello".as_bytes();
+        let l = msg.len();
+        let r = socket1.send_slice(msg);
+        assert_eq!(r, Ok(l));
+        net_debug!("running egress"); 
+        assert_eq!(iface1.socket_egress(), Ok(true));
+
+        // TODO make sure the data arrived at the device level
+        // TODO let the Ohua version run
+        // TODO compare the states of both versions
+    }
+
 }
