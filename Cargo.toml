@@ -127,7 +127,8 @@ required-features = ["std", "medium-ieee802154", "phy-raw_socket", "proto-sixlow
 
 [[example]]
 name="k-v-service"
-required-features = ["std", "ohua_util"]
+required-features = ["std", "ohua_util", "medium-ethernet", "medium-ip",
+  "phy-tuntap_interface", "proto-ipv4", "socket-tcp"]
 
 [profile.release]
 debug = 2
