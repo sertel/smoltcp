@@ -1067,7 +1067,7 @@ where
 
     #[cfg(feature = "ohua")]
     #[allow(dead_code)]
-    fn socket_egress_tcp(&'a mut self) -> Result<bool> {
+    fn socket_egress_tcp(& mut self) -> Result<bool> {
        let sockets = &mut self.sockets;
 
         let mut emitted_any = false;
@@ -1075,21 +1075,21 @@ where
            match sockets.remove_item(handle) {
 
                 None => (), // Can't take out a none.
-                Some(mut item) => {
+                Some(mut socket_item) => {
                     // steal/borrow
                     let inner = self.inner.take().unwrap();
                     let device = self.device.take().unwrap();
                     
-                    if item
+                    if socket_item
                         .meta
                         .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
                     {
-                        match item.socket {
+                        match socket_item.socket {
                             #[cfg(feature = "socket-tcp")]
                             Socket::Tcp(tcp_socket) => {
 
                                 let (innerp, devicep, metap, socketp, res) = 
-                                    go(inner, device, item.meta, Call::Pre(socket_egress_tcp_ip), tcp_socket);
+                                    go(inner, device, socket_item.meta, Call::Pre(socket_egress_tcp_ip), tcp_socket);
 
                                 // return what we have stolen/borrowed
                                 sockets.insert(
@@ -1256,7 +1256,8 @@ where
 fn socket_egress_tcp_ip<'a,'b,'c>(
     inner: &'a mut  InterfaceInner<'b>,
     reprs: (IpRepr, TcpRepr<'c>),
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>>
+{
     let response = IpPacket::Tcp(reprs);
     
     let mut device = OhuaSocket::new();
@@ -1310,7 +1311,8 @@ fn socket_egress_tcp_device<'a, DeviceT: for<'d> Device<'d>>(
     inner: &'a InterfaceInner<'a>,
     device: &mut DeviceT,
     data: Vec<u8>
-) -> Result<()> {
+) -> Result<()>
+{
     // get the token which holds the reference to the device
     let tx_token = device.transmit().ok_or(Error::Exhausted)?;
     let tx_len = data.len();
@@ -2720,7 +2722,7 @@ impl<'a> InterfaceInner<'a> {
                     (HardwareAddress::Ieee802154(_), _) => unreachable!(),
                 };
 
-                net_debug!("done.");
+                net_debug!("Got HW address.");
                 let caps = self.caps.clone();
                 self.dispatch_ethernet(tx_token, ip_repr.total_len(), |mut frame| {
                     frame.set_dst_addr(dst_hardware_addr);
@@ -4354,8 +4356,8 @@ mod test {
         );
     }
 
-    #[test]
-    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp"))]
+   #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_tcp_socket_egress() {
         use crate::socket::TcpSocket;
         use crate::socket::tcp::test::{
@@ -4370,30 +4372,97 @@ mod test {
                 // I could not enforce proto-ipv4
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                    port: 80 
+                    port: 80
                 },
                 IpEndpoint {
-                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST), 
+                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
                     port: 49500} );
+
         iface1.inner = Some(cx);
+        // Devices sending buffer should be empty
+        if let Some(ref device_ref) = iface1.device {
+            assert!(device_ref.empty_tx());
+        }
         let tcp_socket_handle1 = iface1.add_socket(socket);
- 
+
         let socket1 = iface1.get_socket::<TcpSocket>(tcp_socket_handle1);
         assert!(!socket1.can_recv());
-        
         assert!(socket1.may_send());
         assert!(socket1.can_send());
-    
-        let msg = "hello".as_bytes();
-        let l = msg.len();
-        let r = socket1.send_slice(msg);
-        assert_eq!(r, Ok(l));
-        net_debug!("running egress"); 
-        assert_eq!(iface1.socket_egress(), Ok(true));
+        // Sockets sending buffer should be empty before sending
+        assert!(socket1.send_queue()==0);
 
-        // TODO make sure the data arrived at the device level
-        // TODO let the Ohua version run
-        // TODO compare the states of both versions
+
+        let msg = "hello".as_bytes();
+        let msg_len = msg.len();
+        // Enque the message in the sockets sending buffer
+        let result_len = socket1.send_slice(msg);
+        assert_eq!(result_len, Ok(msg_len));
+        net_debug!("running egress");
+        assert_eq!(iface1.socket_egress(), Ok(true));
+       // Make sure the data arrived at the device level:
+        /* socket_egress gets a sending token from the device, passes is through
+         socket.dispatch() and (in this case) device.transmi() -> inner_interface.dispatch()->
+         innner_interface.dispatch_ip() -> inner_interface.dispatch_ethernet() ->  token.cosume()
+         The consume function for Loopback interfaces causes the assembled packet representation
+         to be pushed to the devices Tx queue. So that's where we'd expect to see the packet afterwards
+         */
+        // TODO: I need a function to build the comparison packet (btw. mock packets seem to be needed quite often so ...
+        // Devices sending buffer should contain our packet
+        if let Some(ref device_ref) = iface1.device {
+            assert_eq!(1, device_ref.num_tx_packets());
+            net_debug!("one packet in the buffer :-)");
+        }
+
+
+        // OHUA:
+        net_debug!("Now the same procedure for Ohua");
+        let mut iface2 = create_loopback_ip();
+        let TestSocket{socket, cx} =
+            socket_established_with_endpoints(
+                // I could not enforce proto-ipv4
+                IpEndpoint{
+                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                    port: 80
+                },
+                IpEndpoint {
+                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                    port: 49500} );
+
+        iface2.inner = Some(cx);
+        // Devices sending buffer should again be empty
+        if let Some(ref device_ref) = iface2.device {
+            assert!(device_ref.empty_tx());
+        }
+        let tcp_socket_handle2 = iface2.add_socket(socket);
+
+        let socket2 = iface2.get_socket::<TcpSocket>(tcp_socket_handle2);
+        assert!(!socket2.can_recv());
+        assert!(socket2.may_send());
+        assert!(socket2.can_send());
+        // Sockets sending buffer should be empty before sending
+        assert!(socket2.send_queue()==0);
+
+        // Enque the message in the sockets sending buffer
+        let result_len = socket2.send_slice(msg);
+        assert_eq!(result_len, Ok(msg_len));
+        net_debug!("running egress with ohua version");
+        assert_eq!(iface2.socket_egress_tcp(), Ok(true));
+
+        // Again make sure the data arrived at the device level:
+        // Devices sending buffer should contain our packet
+        if let Some(ref device_ref) = iface2.device {
+            assert_eq!(1, device_ref.num_tx_packets());
+            net_debug!("one packet in the buffer :-)");
+        }
+
+        // TODO compare the states of both sockets
+       let s1 = iface1.get_socket::<TcpSocket>(tcp_socket_handle1).state();
+       let s2 = iface2.get_socket::<TcpSocket>(tcp_socket_handle2).state();
+       assert_eq!(s1, s2);
+
+
+        // As it is a loopback we should also receive from it
     }
 
 }

@@ -56,6 +56,7 @@ impl<'a> Device<'a> for Loopback {
             queue: &mut self.queue,
         })
     }
+
 }
 
 #[doc(hidden)]
@@ -74,7 +75,7 @@ impl phy::RxToken for RxToken {
 
 #[doc(hidden)]
 pub struct TxToken<'a> {
-    queue: &'a mut VecDeque<Vec<u8>>,
+    pub(crate) queue: &'a mut VecDeque<Vec<u8>>,
 }
 
 impl<'a> phy::TxToken for TxToken<'a> {
@@ -88,4 +89,22 @@ impl<'a> phy::TxToken for TxToken<'a> {
         self.queue.push_back(buffer);
         result
     }
+}
+
+
+
+#[cfg(test)]
+impl Loopback{
+    pub(crate) fn empty_tx(&self) -> bool {
+            self.queue.is_empty()
+        }
+    pub(crate) fn num_tx_packets(&self) -> usize {
+        self.queue.len()
+    }
+    /*
+    pub(crate) fn compare_tx(&self, other_txtoken:VecDeque<Vec<u8>>) -> bool {
+            self.queue == other_txtoken
+        }
+
+     */
 }
