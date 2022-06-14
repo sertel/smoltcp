@@ -22,18 +22,14 @@ log = { version = "0.4.4", default-features = false, optional = true }
 libc = { version = "0.2.18", optional = true }
 bitflags = { version = "1.0", default-features = false }
 defmt = { version = "0.3", optional = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "0.2", features = ["full"] }
+
 
 [dev-dependencies]
 env_logger = "0.9"
 getopts = "0.2"
 rand = "0.8"
 url = "2.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "0.2", features = ["full"] }
+
 
 [features]
 std = ["managed/std"]
@@ -62,7 +58,7 @@ verbose = []
 "async" = []
 
 "ohua" = ["socket-tcp"]
-"ohua_util"=[]
+
 
 
 
@@ -74,7 +70,6 @@ default = [
   "socket-raw", "socket-icmp", "socket-udp", "socket-tcp", "socket-dhcpv4",
   "async",
   "ohua",
-  "ohua_util"
 ]
 
 # experimental; do not use; no guarantees provided that this feature will be kept
@@ -125,10 +120,6 @@ required-features = ["std", "medium-ethernet", "medium-ip", "phy-tuntap_interfac
 name = "sixlowpan"
 required-features = ["std", "medium-ieee802154", "phy-raw_socket", "proto-sixlowpan", "socket-udp"]
 
-[[example]]
-name="k-v-service"
-required-features = ["std", "ohua_util", "medium-ethernet", "medium-ip",
-  "phy-tuntap_interface", "proto-ipv4", "socket-tcp"]
 
 [profile.release]
 debug = 2

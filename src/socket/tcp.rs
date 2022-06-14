@@ -2094,6 +2094,7 @@ impl<'a> TcpSocket<'a> {
         }
 
         // Decide whether we're sending a packet.
+        // TODO: WTF.. There is exactly ONE case here, that actually does something. The others are only for logging it seems
         if self.seq_to_transmit(cx) {
             // If we have data to transmit and it fits into partner's window, do it.
             net_trace!(

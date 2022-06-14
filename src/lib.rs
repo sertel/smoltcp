@@ -149,7 +149,6 @@ pub mod socket;
 pub mod storage;
 pub mod time;
 pub mod wire;
-pub mod ohua_util;
 
 /// The error type for the networking stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

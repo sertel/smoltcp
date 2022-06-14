@@ -1,13 +1,14 @@
 mod utils;
+pub mod ohua_util;
 
-use std::collections::{BTreeMap};
+use std::collections::BTreeMap;
 use std::os::unix::io::AsRawFd;
 use std::str;
 
 use log::debug;
-use smoltcp::ohua_util::store::Store;
+use ohua_util::store::Store;
 use smoltcp::iface::{InterfaceBuilder, NeighborCache};
-use smoltcp::phy::{wait as phy_wait, Medium, Device, TunTapInterface};
+use smoltcp::phy::{Device, Medium, TunTapInterface, wait as phy_wait};
 use smoltcp::socket::{TcpSocket, TcpSocketBuffer};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
