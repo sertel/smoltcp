@@ -1,0 +1,30 @@
+[package]
+name = "kv-example"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+managed = { version = "0.8"}
+byteorder = { version = "1.0" }
+log = "0.4.4"
+libc = { version = "0.2.18"}
+bitflags = { version = "1.0"}
+defmt = { version = "0.3"}
+serde = { version = "1.0", features = ["derive"]}
+serde_json = "1.0"
+smoltcp = {path = "../", default-features = true}
+env_logger = "0.9"
+
+[dev-dependencies]
+env_logger = "0.9"
+getopts = "0.2"
+rand = "0.8"
+url = "2.0"
+serde = { version = "1.0", default-features = true }
+serde_json = "1.0"
+
+
+#[dependencies.smoltcp]
+#version = "0.8.0"
+#path = "../"
+#default-features = true

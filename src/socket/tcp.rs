@@ -3122,6 +3122,12 @@ pub(crate) mod test {
         local: IpEndpoint, remote: IpEndpoint) -> TestSocket {
         socket_established_with_buffer_sizes0(64, 64, local, remote)
     }
+    /*
+    pub(crate) fn only_socket_established_with_endpoints(
+        local: IpEndpoint, remote: IpEndpoint) -> TcpSocket<'static> {
+        let TestSocket{socket, cx} = socket_established_with_buffer_sizes0(64, 64, local, remote);
+        socket
+    }*/
 
     pub(crate) fn socket_established() -> TestSocket {
         socket_established_with_buffer_sizes(64, 64)

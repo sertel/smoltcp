@@ -1,17 +1,12 @@
-mod utils;
-pub mod ohua_util;
+mod ohua_util;
 
-use std::collections::BTreeMap;
-use std::os::unix::io::AsRawFd;
 use std::str;
 
 use log::debug;
-use ohua_util::store::Store;
-use smoltcp::iface::{InterfaceBuilder, NeighborCache};
-use smoltcp::phy::{Device, Medium, TunTapInterface, wait as phy_wait};
-use smoltcp::socket::{TcpSocket, TcpSocketBuffer};
+use ohua_util::init_components::{init_app,init_device,init_tcp_ip_stack};
+use smoltcp::phy::{Device, Medium, wait as phy_wait};
+use smoltcp::socket::{TcpSocket};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
 fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
     let recvd_len = octets.len();
@@ -41,43 +36,22 @@ fn main() {
      \/__/         \/__/         \/__/         \/__/                  \|__|
 "#
     );
-    let mut store = Store::default();
-
-
-    let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 64]);
-    let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 128]);
-    let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
-
-
-    let device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
-    let fd = device.as_raw_fd();
-    let neighbor_cache = NeighborCache::new(BTreeMap::new());
-    let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    let ip_addrs = [
-        IpCidr::new(IpAddress::v4(192, 168, 69, 1), 24)
-    ];
-
-    let medium = device.capabilities().medium;
-    let mut builder = InterfaceBuilder::new(device, vec![]).ip_addrs(ip_addrs);
-    if medium == Medium::Ethernet {
-        builder = builder
-            .hardware_addr(ethernet_addr.into())
-            .neighbor_cache(neighbor_cache);
-    }
-    let mut iface = builder.finalize();
-
-    let tcp_handle = iface.add_socket(tcp_socket);
+    let mut app = init_app();
+    let (device_n, fd) = init_device();
+    let (mut tcp_ip_stack, socket_handle) = init_tcp_ip_stack(device_n);
+    assert!(app.testnum == 3);
+    assert!(tcp_ip_stack.device().capabilities().medium == Medium::Ethernet);
 
     loop {
         let timestamp = Instant::now();
-        match iface.poll(timestamp) {
+        match tcp_ip_stack.poll(timestamp) {
             Ok(_) => {}
             Err(e) => {
                 debug!("poll error: {}", e);
             }
         }
 
-        let socket = iface.get_socket::<TcpSocket>(tcp_handle);
+        let socket = tcp_ip_stack.get_socket::<TcpSocket>(socket_handle);
         if !socket.is_open() {
             socket.listen(6969).unwrap();
         }
@@ -89,7 +63,7 @@ fn main() {
                     "tcp:6969 send data: {:?}",
                     str::from_utf8(input.as_ref()).unwrap_or("(invalid utf8)")
                 );
-                let outbytes = store.handle_message(&input);
+                let outbytes = app.handle_message(input);
                 socket.send_slice(&outbytes[..]).unwrap();
             }
         } else if socket.may_send() {
@@ -97,6 +71,6 @@ fn main() {
             socket.close();
         }
 
-        phy_wait(fd, iface.poll_delay(timestamp)).expect("wait error");
+        phy_wait(fd, tcp_ip_stack.poll_delay(timestamp)).expect("wait error");
     }
 }
