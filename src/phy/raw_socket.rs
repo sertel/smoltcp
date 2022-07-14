@@ -29,6 +29,7 @@ impl RawSocket {
     /// set on the executable.
     pub fn new(name: &str, medium: Medium) -> io::Result<RawSocket> {
         let mut lower = sys::RawSocketDesc::new(name, medium)?;
+        // configures system level socket e.g. bind Adress Family etc.
         lower.bind_interface()?;
 
         let mut mtu = lower.interface_mtu()?;

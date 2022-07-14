@@ -1502,6 +1502,8 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ethernet")]
+    // Ignore packets with wrong adress, otherwise check protocol and proceed processing
+    // with self.process_$protocoll(sockets, packet)
     fn process_ethernet<'frame, T: AsRef<[u8]>>(
         &mut self,
         sockets: &mut SocketSet,
@@ -1862,6 +1864,11 @@ impl<'a> InterfaceInner<'a> {
         }
     }
 
+    // process_ethernet found an incomming IPv4 packet and called process_ipv4
+    // again ignore wrongly adressed packages (this time at ip level)
+    // match the concrete protocoll (tcp/dhcp/igmp/...) and call
+    // self.process_$concretepprotocoll
+    // if no concrete protocoll applies or adress unreachable  -> send response icmp-unreachable
     #[cfg(feature = "proto-ipv4")]
     fn process_ipv4<'frame, T: AsRef<[u8]> + ?Sized>(
         &mut self,
@@ -2431,6 +2438,11 @@ impl<'a> InterfaceInner<'a> {
         }
     }
 
+    // called by self.process_ipv4 or self.process_next_header
+    // checks for every socket, if the socket accepts the package (given it's current state and the
+    // packages destination)
+    // if a socket accepts call socket.process(ip_packet, tcp_packet)
+    // and if this return a valid reply return the reply
     #[cfg(feature = "socket-tcp")]
     fn process_tcp<'frame>(
         &mut self,
@@ -2573,6 +2585,7 @@ impl<'a> InterfaceInner<'a> {
     where
         Tx: TxToken,
     {
+        //  If it's broadcast -> return prot specific broadcast address and token
         net_debug!("lookup");
         if dst_addr.is_broadcast() {
             net_debug!("found broadcast");
@@ -2587,7 +2600,7 @@ impl<'a> InterfaceInner<'a> {
 
             return Ok((hardware_addr, tx_token));
         }
-
+        // If it's multicast -> return prot specific multicast address and tx_token
         if dst_addr.is_multicast() {
             let b = dst_addr.as_bytes();
             let hardware_addr = match *dst_addr {
@@ -2622,8 +2635,11 @@ impl<'a> InterfaceInner<'a> {
             return Ok((hardware_addr, tx_token));
         }
 
+        // It's not multi/broadcast -> get next-hop from InnerInterface routes
+        // i.e. Ip of router if the dst IP is in another network
         let dst_addr = self.route(dst_addr, self.now)?;
 
+        // If HW address of new dst address is in the cache -> return (Hw address, tx, token)
         match self
             .neighbor_cache
             .as_mut()
@@ -2635,6 +2651,9 @@ impl<'a> InterfaceInner<'a> {
             _ => (), // XXX
         }
 
+        // dst is a single IP & not in the cache ->
+        //  if IPv4 -> send an arp request via inner.dispatch_ethernet
+        //  if IPv6 -> send a neighbor solicitation via inner.dispatch_ip
         match (src_addr, dst_addr) {
             #[cfg(feature = "proto-ipv4")]
             (&IpAddress::Ipv4(src_addr), IpAddress::Ipv4(dst_addr)) => {
@@ -2710,6 +2729,12 @@ impl<'a> InterfaceInner<'a> {
 
         match self.caps.medium {
             #[cfg(feature = "medium-ethernet")]
+            // call inner.lookup_hardware_addr -> if a HW address is returned:
+            //      call inner.dispatch_ethernet(tx_tokenn, packet_len, closure)
+            //      where 'closure' is a closure that takes a provided frame buffer (from the device)
+            //      sets the HW address for that buffer, and emits the packet and ip representation content
+            //      into that frame buffer
+
             Medium::Ethernet => {
                 net_debug!("looking up HW addr ...");
                 let (dst_hardware_addr, tx_token) = match self.lookup_hardware_addr(
@@ -2737,10 +2762,14 @@ impl<'a> InterfaceInner<'a> {
                     ip_repr.emit(frame.payload_mut(), &caps.checksum);
 
                     let payload = &mut frame.payload_mut()[ip_repr.buffer_len()..];
+                    // Question: Why do they copy the ip_repr to the buffer, just to retrieve it back afterwards as payload and put both
                     packet.emit_payload(ip_repr, payload, &caps);
                 })
             }
             #[cfg(feature = "medium-ip")]
+            // No HW address required (not sure how that works)
+            // calls tx_token.consume with a closure emitting the packet
+            // into the device provided frame buffer directly
             Medium::Ip => {
                 let tx_len = ip_repr.total_len();
                 tx_token.consume(self.now, tx_len, |mut tx_buffer| {
@@ -4356,7 +4385,7 @@ mod test {
         );
     }
 
-   #[test]
+    #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_tcp_socket_egress() {
         use crate::socket::TcpSocket;
@@ -4462,7 +4491,36 @@ mod test {
        assert_eq!(s1, s2);
 
 
-        // As it is a loopback we should also receive from it
+        // As it is a loopback we should also be able to receive from it
+        iface1.socket_ingress();
     }
+
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_tcp_socket_ingress() {
+        /*let TestSocket{socket, cx} = socket_established_with_endpoints(
+                // local
+                IpEndpoint{
+                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                    port: 80
+                },
+                // remote
+                IpEndpoint {
+                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                    port: 49500} );
+        let mock_context = InterfaceInner::mock();
+        // assert_eq!(mock_context, mock_context);
+        // TODO: The igmp test uses igress and puts the packet directly into the device before
+        // do this.*/
+        assert!(true);
+    }
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_tcp_loop() {
+        // TODO: Rebuild the loopback example, jsut in ccase we're not testing examples all the
+        // time and mess something up
+    }
+
+
 
 }
