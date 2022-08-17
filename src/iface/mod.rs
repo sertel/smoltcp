@@ -10,6 +10,7 @@ mod neighbor;
 mod route;
 mod socket_meta;
 mod socket_set;
+mod interface_ohua;
 
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 pub(crate) use self::neighbor::Answer as NeighborAnswer;
@@ -19,5 +20,6 @@ pub use self::neighbor::Cache as NeighborCache;
 pub use self::neighbor::Neighbor;
 pub use self::route::{Route, Routes};
 pub use socket_set::{SocketHandle, SocketStorage};
-
 pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context};
+pub use self::interface_ohua::{OInterface, OInterfaceBuilder,
+                               OInterfaceInner as OContext};

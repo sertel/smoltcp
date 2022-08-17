@@ -1281,7 +1281,7 @@ fn socket_egress_tcp_ip<'a,'b,'c>(
 #[cfg(feature = "ohua")]
 fn socket_egress_tcp_pre<'a>(
     inner: &'a InterfaceInner<'a>,
-    tcp_socket: &'a mut TcpSocket<'a>,
+    tcp_socket: &'a mut OhuaTcpSocket<'a>,
 ) -> Result<(Vec<u8>, bool)> {
     let (ip_repr, tcp_repr, b) = tcp_socket.dispatch_before(
         inner)?;
@@ -1335,7 +1335,7 @@ fn socket_egress_tcp_device<'a, DeviceT: for<'d> Device<'d>>(
 #[cfg(feature = "ohua")]
 fn socket_egress_tcp_post<'a>(
     inner: &'a InterfaceInner<'a>,
-    tcp_socket: &'a mut TcpSocket<'a>,
+    tcp_socket: &'a mut OhuaTcpSocket<'a>,
     result: (TcpRepr<'a>, bool),
 ) -> () {
     tcp_socket.dispatch_after(inner, result)

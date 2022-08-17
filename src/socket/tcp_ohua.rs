@@ -8,7 +8,7 @@ use core::{cmp, fmt, mem};
 
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
-use crate::socket::{Context, PollAt};
+use crate::socket::{OContext, PollAt};
 use crate::storage::{Assembler, RingBuffer};
 use crate::time::{Duration, Instant};
 use crate::wire::{
@@ -309,7 +309,7 @@ enum AckDelayTimer {
 /// accept several connections, as many sockets must be allocated, or any new connection
 /// attempts will be reset.
 #[derive(Debug)]
-pub struct TcpSocket<'a> {
+pub struct OhuaTcpSocket<'a> {
     state: State,
     timer: Timer,
     rtte: RttEstimator,
@@ -392,10 +392,10 @@ pub struct TcpSocket<'a> {
 
 const DEFAULT_MSS: usize = 536;
 
-impl<'a> TcpSocket<'a> {
+impl<'a> OhuaTcpSocket<'a> {
     #[allow(unused_comparisons)] // small usize platforms always pass rx_capacity check
     /// Create a socket using the given buffers.
-    pub fn new<T>(rx_buffer: T, tx_buffer: T) -> TcpSocket<'a>
+    pub fn new<T>(rx_buffer: T, tx_buffer: T) -> OhuaTcpSocket<'a>
     where
         T: Into<SocketBuffer<'a>>,
     {
@@ -411,7 +411,7 @@ impl<'a> TcpSocket<'a> {
         }
         let rx_cap_log2 = mem::size_of::<usize>() * 8 - rx_capacity.leading_zeros() as usize;
 
-        TcpSocket {
+        OhuaTcpSocket {
             state: State::Closed,
             timer: Timer::new(),
             rtte: RttEstimator::default(),
@@ -712,7 +712,7 @@ impl<'a> TcpSocket<'a> {
     /// is unspecified.
     pub fn connect<T, U>(
         &mut self,
-        cx: &mut Context,
+        cx: &mut OContext,
         remote_endpoint: T,
         local_endpoint: U,
     ) -> Result<()>
@@ -757,12 +757,12 @@ impl<'a> TcpSocket<'a> {
     }
 
     #[cfg(test)]
-    fn random_seq_no(_cx: &mut Context) -> TcpSeqNumber {
+    fn random_seq_no(_cx: &mut OContext) -> TcpSeqNumber {
         TcpSeqNumber(10000)
     }
 
     #[cfg(not(test))]
-    fn random_seq_no(cx: &mut Context) -> TcpSeqNumber {
+    fn random_seq_no(cx: &mut OContext) -> TcpSeqNumber {
         TcpSeqNumber(cx.rand().rand_u32() as i32)
     }
 
@@ -1229,7 +1229,7 @@ impl<'a> TcpSocket<'a> {
 
     fn challenge_ack_reply(
         &mut self,
-        cx: &mut Context,
+        cx: &mut OContext,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
@@ -1243,7 +1243,7 @@ impl<'a> TcpSocket<'a> {
         return Some(self.ack_reply(ip_repr, repr));
     }
 
-    pub(crate) fn accepts(&self, _cx: &mut Context, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
+    pub(crate) fn accepts(&self, _cx: &mut OContext, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
         if self.state == State::Closed {
             return false;
         }
@@ -1280,7 +1280,7 @@ impl<'a> TcpSocket<'a> {
 
     pub(crate) fn process(
         &mut self,
-        cx: &mut Context,
+        cx: &mut OContext,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
     ) -> Result<Option<(IpRepr, TcpRepr<'static>)>> {
@@ -1952,7 +1952,7 @@ impl<'a> TcpSocket<'a> {
         }
     }
 
-    fn seq_to_transmit(&self, cx: &Context) -> bool {
+    fn seq_to_transmit(&self, cx: &OContext) -> bool {
         let ip_header_len = match self.local_endpoint.addr {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
@@ -2039,9 +2039,9 @@ impl<'a> TcpSocket<'a> {
         }
     }
 
-    pub(crate) fn dispatch<F>(&mut self, cx: &mut Context, emit: F) -> Result<()>
+    pub(crate) fn dispatch<F>(&mut self, cx: &mut OContext, emit: F) -> Result<()>
     where
-        F: FnOnce(&mut Context, (IpRepr, TcpRepr)) -> Result<()>,
+        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<()>,
     {
         if !self.remote_endpoint.is_specified() {
             return Err(Error::Exhausted);
@@ -2373,9 +2373,369 @@ impl<'a> TcpSocket<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "ohua")]
+    pub(crate) fn dispatch_before(
+        &mut self, cx: &OContext
+    ) -> Result<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
+    {
+        if !self.remote_endpoint.is_specified() {
+            return Err(Error::Exhausted);
+        }
+
+        if self.remote_last_ts.is_none() {
+            // We get here in exactly two cases:
+            //  1) This socket just transitioned into SYN-SENT.
+            //  2) This socket had an empty transmit buffer and some data was added there.
+            // Both are similar in that the socket has been quiet for an indefinite
+            // period of time, it isn't anymore, and the local endpoint is talking.
+            // So, we start counting the timeout not from the last received packet
+            // but from the first transmitted one.
+            self.remote_last_ts = Some(cx.now());
+        }
+
+        // Check if any state needs to be changed because of a timer.
+        if self.timed_out(cx.now()) {
+            // If a timeout expires, we should abort the connection.
+            net_debug!(
+                "tcp:{}:{}: timeout exceeded",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+            self.set_state(State::Closed);
+        } else if !self.seq_to_transmit(cx) {
+            if let Some(retransmit_delta) = self.timer.should_retransmit(cx.now()) {
+                // If a retransmit timer expired, we should resend data starting at the last ACK.
+                net_debug!(
+                    "tcp:{}:{}: retransmitting at t+{}",
+                    self.local_endpoint,
+                    self.remote_endpoint,
+                    retransmit_delta
+                );
+
+                // Rewind "last sequence number sent", as if we never
+                // had sent them. This will cause all data in the queue
+                // to be sent again.
+                self.remote_last_seq = self.local_seq_no;
+
+                // Clear the `should_retransmit` state. If we can't retransmit right
+                // now for whatever reason (like zero window), this avoids an
+                // infinite polling loop where `poll_at` returns `Now` but `dispatch`
+                // can't actually do anything.
+                self.timer.set_for_idle(cx.now(), self.keep_alive);
+
+                // Inform RTTE, so that it can avoid bogus measurements.
+                self.rtte.on_retransmit();
+            }
+        }
+
+        // Decide whether we're sending a packet.
+        if self.seq_to_transmit(cx) {
+            // If we have data to transmit and it fits into partner's window, do it.
+            net_trace!(
+                "tcp:{}:{}: outgoing segment will send data or flags",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+        } else if self.ack_to_transmit() && self.delayed_ack_expired(cx.now()) {
+            // If we have data to acknowledge, do it.
+            net_trace!(
+                "tcp:{}:{}: outgoing segment will acknowledge",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+        } else if self.window_to_update() && self.delayed_ack_expired(cx.now()) {
+            // If we have window length increase to advertise, do it.
+            net_trace!(
+                "tcp:{}:{}: outgoing segment will update window",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+        } else if self.state == State::Closed {
+            // If we need to abort the connection, do it.
+            net_trace!(
+                "tcp:{}:{}: outgoing segment will abort connection",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+        } else if self.timer.should_keep_alive(cx.now()) {
+            // If we need to transmit a keep-alive packet, do it.
+            net_trace!(
+                "tcp:{}:{}: keep-alive timer expired",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+        } else if self.timer.should_close(cx.now()) {
+            // If we have spent enough time in the TIME-WAIT state, close the socket.
+            net_trace!(
+                "tcp:{}:{}: TIME-WAIT timer expired",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+            self.reset();
+            return Err(Error::Exhausted);
+        } else {
+            return Err(Error::Exhausted);
+        }
+
+        // Construct the lowered IP representation.
+        // We might need this to calculate the MSS, so do it early.
+        let mut ip_repr = IpRepr::Unspecified {
+            src_addr: self.local_endpoint.addr,
+            dst_addr: self.remote_endpoint.addr,
+            protocol: IpProtocol::Tcp,
+            hop_limit: self.hop_limit.unwrap_or(64),
+            payload_len: 0,
+        }
+        .lower(&[])?;
+
+        // Construct the basic TCP representation, an empty ACK packet.
+        // We'll adjust this to be more specific as needed.
+        let mut repr = TcpRepr {
+            src_port: self.local_endpoint.port,
+            dst_port: self.remote_endpoint.port,
+            control: TcpControl::None,
+            seq_number: self.remote_last_seq,
+            ack_number: Some(self.remote_seq_no + self.rx_buffer.len()),
+            window_len: self.scaled_window(),
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None, None, None],
+            payload: &[],
+        };
+
+        match self.state {
+            // We transmit an RST in the CLOSED state. If we ended up in the CLOSED state
+            // with a specified endpoint, it means that the socket was aborted.
+            State::Closed => {
+                repr.control = TcpControl::Rst;
+            }
+
+            // We never transmit anything in the LISTEN state.
+            State::Listen => return Err(Error::Exhausted),
+
+            // We transmit a SYN in the SYN-SENT state.
+            // We transmit a SYN|ACK in the SYN-RECEIVED state.
+            State::SynSent | State::SynReceived => {
+                repr.control = TcpControl::Syn;
+                // window len must NOT be scaled in SYNs.
+                repr.window_len = self.rx_buffer.window().min((1 << 16) - 1) as u16;
+                if self.state == State::SynSent {
+                    repr.ack_number = None;
+                    repr.window_scale = Some(self.remote_win_shift);
+                    repr.sack_permitted = true;
+                } else {
+                    repr.sack_permitted = self.remote_has_sack;
+                    repr.window_scale = self.remote_win_scale.map(|_| self.remote_win_shift);
+                }
+            }
+
+            // We transmit data in all states where we may have data in the buffer,
+            // or the transmit half of the connection is still open.
+            State::Established
+            | State::FinWait1
+            | State::Closing
+            | State::CloseWait
+            | State::LastAck => {
+                // Extract as much data as the remote side can receive in this packet
+                // from the transmit buffer.
+
+                // Right edge of window, ie the max sequence number we're allowed to send.
+                let win_right_edge = self.local_seq_no + self.remote_win_len;
+
+                // Max amount of octets we're allowed to send according to the remote window.
+                let win_limit = if win_right_edge >= self.remote_last_seq {
+                    win_right_edge - self.remote_last_seq
+                } else {
+                    // This can happen if we've sent some data and later the remote side
+                    // has shrunk its window so that data is no longer inside the window.
+                    // This should be very rare and is strongly discouraged by the RFCs,
+                    // but it does happen in practice.
+                    // http://www.tcpipguide.com/free/t_TCPWindowManagementIssues.htm
+                    0
+                };
+
+                // Maximum size we're allowed to send. This can be limited by 3 factors:
+                // 1. remote window
+                // 2. MSS the remote is willing to accept, probably determined by their MTU
+                // 3. MSS we can send, determined by our MTU.
+                let size = win_limit
+                    .min(self.remote_mss)
+                    .min(cx.ip_mtu() - ip_repr.buffer_len() - TCP_HEADER_LEN);
+
+                let offset = self.remote_last_seq - self.local_seq_no;
+                repr.payload = self.tx_buffer.get_allocated(offset, size);
+
+                // If we've sent everything we had in the buffer, follow it with the PSH or FIN
+                // flags, depending on whether the transmit half of the connection is open.
+                if offset + repr.payload.len() == self.tx_buffer.len() {
+                    match self.state {
+                        State::FinWait1 | State::LastAck | State::Closing => {
+                            repr.control = TcpControl::Fin
+                        }
+                        State::Established | State::CloseWait if !repr.payload.is_empty() => {
+                            repr.control = TcpControl::Psh
+                        }
+                        _ => (),
+                    }
+                }
+            }
+
+            // In FIN-WAIT-2 and TIME-WAIT states we may only transmit ACKs for incoming data or FIN
+            State::FinWait2 | State::TimeWait => {}
+        }
+
+        // There might be more than one reason to send a packet. E.g. the keep-alive timer
+        // has expired, and we also have data in transmit buffer. Since any packet that occupies
+        // sequence space will elicit an ACK, we only need to send an explicit packet if we
+        // couldn't fill the sequence space with anything.
+        let is_keep_alive;
+        if self.timer.should_keep_alive(cx.now()) && repr.is_empty() {
+            repr.seq_number = repr.seq_number - 1;
+            repr.payload = b"\x00"; // RFC 1122 says we should do this
+            is_keep_alive = true;
+        } else {
+            is_keep_alive = false;
+        }
+
+        // Trace a summary of what will be sent.
+        if is_keep_alive {
+            net_trace!(
+                "tcp:{}:{}: sending a keep-alive",
+                self.local_endpoint,
+                self.remote_endpoint
+            );
+        } else if !repr.payload.is_empty() {
+            net_trace!(
+                "tcp:{}:{}: tx buffer: sending {} octets at offset {}",
+                self.local_endpoint,
+                self.remote_endpoint,
+                repr.payload.len(),
+                self.remote_last_seq - self.local_seq_no
+            );
+        }
+        if repr.control != TcpControl::None || repr.payload.is_empty() {
+            let flags = match (repr.control, repr.ack_number) {
+                (TcpControl::Syn, None) => "SYN",
+                (TcpControl::Syn, Some(_)) => "SYN|ACK",
+                (TcpControl::Fin, Some(_)) => "FIN|ACK",
+                (TcpControl::Rst, Some(_)) => "RST|ACK",
+                (TcpControl::Psh, Some(_)) => "PSH|ACK",
+                (TcpControl::None, Some(_)) => "ACK",
+                _ => "<unreachable>",
+            };
+            net_trace!(
+                "tcp:{}:{}: sending {}",
+                self.local_endpoint,
+                self.remote_endpoint,
+                flags
+            );
+        }
+
+        if repr.control == TcpControl::Syn {
+            // Fill the MSS option. See RFC 6691 for an explanation of this calculation.
+            let max_segment_size = cx.ip_mtu() - ip_repr.buffer_len() - TCP_HEADER_LEN;
+            repr.max_seg_size = Some(max_segment_size as u16);
+        }
+
+        // Actually send the packet. If this succeeds, it means the packet is in
+        // the device buffer, and its transmission is imminent. If not, we might have
+        // a number of problems, e.g. we need neighbor discovery.
+        //
+        // Bailing out if the packet isn't placed in the device buffer allows us
+        // to not waste time waiting for the retransmit timer on packets that we know
+        // for sure will not be successfully transmitted.
+        ip_repr.set_payload_len(repr.buffer_len());
+
+        // according to the call above, the payload should be set at this point
+        // and we can readily derive a TcpReprP.
+        let ip_repr_c = ip_repr.clone();
+        let tcp_repr = TcpReprP::from(repr);
+        Ok(
+            ((ip_repr, repr)
+            ,(
+                tcp_repr,
+                ip_repr_c,
+                is_keep_alive
+                )
+            )
+        )
+    }
+
+    #[cfg(feature = "ohua")]
+    #[allow(dead_code)] // the normal interface from the original code
+    pub(crate) fn dispatch_device<F>(
+        &mut self, cx: &mut OContext, (ip_repr,repr):(IpRepr,TcpRepr), emit: F
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<()>,
+    {
+        emit(cx, (ip_repr, repr))
+    }
+
+    #[cfg(feature = "ohua")]
+    pub(crate) fn dispatch_after(
+        &mut self,
+        cx: &OContext,
+        (repr, is_keep_alive): (TcpReprP, bool)
+    )
+    {
+        // We've sent something, whether useful data or a keep-alive packet, so rewind
+        // the keep-alive timer.
+        self.timer.rewind_keep_alive(cx.now(), self.keep_alive);
+
+        // Reset delayed-ack timer
+        match self.ack_delay_timer {
+            AckDelayTimer::Idle => {}
+            AckDelayTimer::Waiting(_) => {
+                net_trace!(
+                    "tcp:{}:{}: stop delayed ack timer",
+                    self.local_endpoint,
+                    self.remote_endpoint
+                )
+            }
+            AckDelayTimer::Immediate => {
+                net_trace!(
+                    "tcp:{}:{}: stop delayed ack timer (was force-expired)",
+                    self.local_endpoint,
+                    self.remote_endpoint
+                )
+            }
+        }
+        self.ack_delay_timer = AckDelayTimer::Idle;
+
+        // Leave the rest of the state intact if sending a keep-alive packet, since those
+        // carry a fake segment.
+        if is_keep_alive {
+            return;
+        }
+
+        // We've sent a packet successfully, so we can update the internal state now.
+        self.remote_last_seq = repr.seq_number + repr.segment_len();
+        self.remote_last_ack = repr.ack_number;
+        self.remote_last_win = repr.window_len;
+
+        if repr.segment_len() > 0 {
+            self.rtte
+                .on_send(cx.now(), repr.seq_number + repr.segment_len());
+        }
+
+        if !self.seq_to_transmit(cx) && repr.segment_len() > 0 {
+            // If we've transmitted all data we could (and there was something at all,
+            // data or flag, to transmit, not just an ACK), wind up the retransmit timer.
+            self.timer
+                .set_for_retransmit(cx.now(), self.rtte.retransmission_timeout());
+        }
+
+        if self.state == State::Closed {
+            // When aborting a connection, forget about it after sending a single RST packet.
+            self.local_endpoint = IpEndpoint::default();
+            self.remote_endpoint = IpEndpoint::default();
+        }
+    }
 
     #[allow(clippy::if_same_then_else)]
-    pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
+    pub(crate) fn poll_at(&self, cx: &mut OContext) -> PollAt {
         // The logic here mirrors the beginning of dispatch() closely.
         if !self.remote_endpoint.is_specified() {
             // No one to talk to, nothing to transmit.
@@ -2415,18 +2775,38 @@ impl<'a> TcpSocket<'a> {
         }
     }
 
+    #[cfg(feature = "ohua")]
+    pub(crate) fn dispatch_c(&mut self, cx: &mut OContext, d: Call) -> Results {
+        match d {
+            Call::Pre(emit) => 
+                Results::Pre(
+                    // monadic programming in Rust
+                    // to me this is absolutely weird: monadic programming facilitates imperative
+                    // programming but Rust is already an imperative langauage!
+                    self.dispatch_before(cx)
+                        .and_then(|(reprs,c)|{
+                            // and here is the according functor map
+                            emit(cx, reprs).map(|x| (x,c))
+                        })
+                ),
+            Call::Post(tcp_repr, is_keep_alive) => {
+                self.dispatch_after(cx, (tcp_repr, is_keep_alive));
+                Results::Post
+            }
+        }
+    }
 }
 
 
 // TODO What is the proper way to make this work without explicitly threading the socket?
 // The problem was that this function require an explict lifetime of 'a for the mutable borrow:
-// pub(crate) fn dispatch_c<'a>(socket: &'a mut OhuaTcpSocket<'a>, cx: &Context, d: Call<'a>) -> Results<'a>
+// pub(crate) fn dispatch_c<'a>(socket: &'a mut OhuaTcpSocket<'a>, cx: &OContext, d: Call<'a>) -> Results<'a> 
 // As a result, in the code that calls this function, I could not pass the borrowed socket on to
 // the recursive call.
 // I couldn't even get it fixed when state threading:
 // I suppose the only way to fix this would be to completely remove the borrowing.
 // #[cfg(feature = "ohua")]
-// pub fn dispatch_c<'a>(socket:&'a mut OhuaTcpSocket<'a>, cx: &Context, d: Call) -> Results<'a> {
+// pub fn dispatch_c<'a>(socket:&'a mut OhuaTcpSocket<'a>, cx: &OContext, d: Call) -> Results<'a> {
 //     match d {
 //         Call::Pre => Results::Pre(socket.dispatch_before(cx)),
 //         Call::Post(tcp_repr, is_keep_alive) => {
@@ -2436,8 +2816,20 @@ impl<'a> TcpSocket<'a> {
 //     }
 // }
 
+#[cfg(feature = "ohua")]
+pub enum Results {
+    Pre(Result<(Vec<u8>, (TcpReprP,IpRepr, bool))>),
+    Post
+}
 
-impl<'a> fmt::Write for TcpSocket<'a> {
+#[cfg(feature = "ohua")]
+pub enum Call {
+    Pre(fn(&mut OContext, (IpRepr, TcpRepr)) -> Result<Vec<u8>>),
+    Post(TcpReprP, bool)
+}
+
+
+impl<'a> fmt::Write for OhuaTcpSocket<'a> {
     fn write_str(&mut self, slice: &str) -> fmt::Result {
         let slice = slice.as_bytes();
         if self.send_slice(slice) == Ok(slice.len()) {
@@ -2525,12 +2917,12 @@ pub(crate) mod test {
     // =========================================================================================//
 
     pub(crate) struct TestSocket {
-        pub(crate) socket: TcpSocket<'static>,
-        pub(crate) cx: Context<'static>,
+        pub(crate) socket: OhuaTcpSocket<'static>,
+        pub(crate) cx: OContext<'static>,
     }
 
     impl Deref for TestSocket {
-        type Target = TcpSocket<'static>;
+        type Target = OhuaTcpSocket<'static>;
         fn deref(&self) -> &Self::Target {
             &self.socket
         }
@@ -2650,9 +3042,9 @@ pub(crate) mod test {
     fn socket_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
         let rx_buffer = SocketBuffer::new(vec![0; rx_len]);
         let tx_buffer = SocketBuffer::new(vec![0; tx_len]);
-        let mut socket = TcpSocket::new(rx_buffer, tx_buffer);
+        let mut socket = OhuaTcpSocket::new(rx_buffer, tx_buffer);
         socket.set_ack_delay(None);
-        let cx = Context::mock();
+        let cx = OContext::mock();
         TestSocket { socket, cx }
     }
 

@@ -39,8 +39,8 @@ fn main() {
     let mut app = init_app();
     let (device_n, fd) = init_device();
     let (mut tcp_ip_stack, socket_handle) = init_tcp_ip_stack(device_n);
-    assert!(app.testnum == 3);
-    assert!(tcp_ip_stack.device().capabilities().medium == Medium::Ethernet);
+    assert_eq!(app.testnum, 3);
+    assert_eq!(tcp_ip_stack.device().capabilities().medium, Medium::Ethernet);
 
     loop {
         let timestamp = Instant::now();
@@ -57,6 +57,9 @@ fn main() {
         }
 
         if socket.may_recv() {
+            // ToDo: Check how we will handle function references i.e. can we "tell"
+            //       Socket.recv to use this/any partcular function?
+            //       Simple way out would be to cleanly separate and have the socket return the pure buffer
             let input = socket.recv(process_octets).unwrap();
             if socket.can_send() && !input.is_empty() {
                 debug!(

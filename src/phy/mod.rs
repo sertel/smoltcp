@@ -113,6 +113,7 @@ mod tracer;
     any(target_os = "linux", target_os = "android")
 ))]
 mod tuntap_interface;
+mod ohua_raw_socket;
 
 #[cfg(all(
     any(feature = "phy-raw_socket", feature = "phy-tuntap_interface"),
@@ -121,7 +122,7 @@ mod tuntap_interface;
 pub use self::sys::wait;
 
 pub use self::fault_injector::FaultInjector;
-pub use self::fuzz_injector::{FuzzInjector, Fuzzer};
+pub use self::fuzz_injector::{Fuzzer, FuzzInjector};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use self::loopback::Loopback;
 pub use self::pcap_writer::{PcapLinkType, PcapMode, PcapSink, PcapWriter};

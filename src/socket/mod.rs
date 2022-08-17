@@ -12,6 +12,8 @@ size for a buffer, allocate it, and let the networking stack use it.
 */
 
 use crate::iface::Context;
+use crate::iface::OContext;
+use crate::socket::tcp_ohua::OhuaTcpSocket;
 use crate::time::Instant;
 
 #[cfg(feature = "socket-dhcpv4")]
@@ -27,6 +29,10 @@ mod udp;
 
 #[cfg(feature = "async")]
 mod waker;
+
+#[cfg(feature = "ohua")]
+pub(crate) mod tcp_ohua;
+mod raw_ohua;
 
 #[cfg(feature = "socket-dhcpv4")]
 pub use self::dhcpv4::{Config as Dhcpv4Config, Dhcpv4Socket, Event as Dhcpv4Event};
@@ -76,6 +82,10 @@ pub enum Socket<'a> {
     Udp(UdpSocket<'a>),
     #[cfg(feature = "socket-tcp")]
     Tcp(TcpSocket<'a>),
+    #[cfg(feature = "ohua")]
+    OhuaTcp(OhuaTcpSocket<'a>),
+    #[cfg(feature = "ohua")]
+    OhuaRaw(OhuaRawSocket<'a>),
     #[cfg(feature = "socket-dhcpv4")]
     Dhcpv4(Dhcpv4Socket),
 }
@@ -91,6 +101,14 @@ impl<'a> Socket<'a> {
             Socket::Udp(s) => s.poll_at(cx),
             #[cfg(feature = "socket-tcp")]
             Socket::Tcp(s) => s.poll_at(cx),
+            #[cfg(feature = "ohua")]
+            Socket::OhuaTcp(_s) =>
+                panic!("Sry. I need to accept two kinds of contexts here and \
+                        haven't implemented this yet "),
+            #[cfg(feature = "ohua")]
+            Socket::OhuaRaw(_s) =>
+                panic!("Sry. I need to accept two kinds of contexts here and \
+                        haven't implemented this yet "),
             #[cfg(feature = "socket-dhcpv4")]
             Socket::Dhcpv4(s) => s.poll_at(cx),
         }
@@ -129,5 +147,7 @@ from_socket!(IcmpSocket<'a>, Icmp);
 from_socket!(UdpSocket<'a>, Udp);
 #[cfg(feature = "socket-tcp")]
 from_socket!(TcpSocket<'a>, Tcp);
+#[cfg(feature = "ohua")]
+from_socket!(OhuaTcpSocket<'a>, OhuaTcp);
 #[cfg(feature = "socket-dhcpv4")]
 from_socket!(Dhcpv4Socket, Dhcpv4);
