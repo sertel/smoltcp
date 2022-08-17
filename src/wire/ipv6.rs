@@ -3,10 +3,10 @@
 use byteorder::{ByteOrder, NetworkEndian};
 use core::fmt;
 
+use super::{Error, Result};
 use crate::wire::ip::pretty_print_ip_payload;
 #[cfg(feature = "proto-ipv4")]
 use crate::wire::ipv4;
-use crate::{Error, Result};
 
 pub use super::IpProtocol as Protocol;
 
@@ -26,17 +26,17 @@ impl Address {
     /// [unspecified address]: https://tools.ietf.org/html/rfc4291#section-2.5.2
     pub const UNSPECIFIED: Address = Address([0x00; 16]);
 
-    /// The link-local [all routers multicast address].
+    /// The link-local [all nodes multicast address].
     ///
-    /// [all routers multicast address]: https://tools.ietf.org/html/rfc4291#section-2.7.1
+    /// [all nodes multicast address]: https://tools.ietf.org/html/rfc4291#section-2.7.1
     pub const LINK_LOCAL_ALL_NODES: Address = Address([
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01,
     ]);
 
-    /// The link-local [all nodes multicast address].
+    /// The link-local [all routers multicast address].
     ///
-    /// [all nodes multicast address]: https://tools.ietf.org/html/rfc4291#section-2.7.1
+    /// [all routers multicast address]: https://tools.ietf.org/html/rfc4291#section-2.7.1
     pub const LINK_LOCAL_ALL_ROUTERS: Address = Address([
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x02,
@@ -158,7 +158,7 @@ impl Address {
         }
     }
 
-    /// Helper function used to mask an addres given a prefix.
+    /// Helper function used to mask an address given a prefix.
     ///
     /// # Panics
     /// This function panics if `mask` is greater than 128.
@@ -187,6 +187,13 @@ impl Address {
             0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xFF,
             self.0[13], self.0[14], self.0[15],
         ])
+    }
+
+    /// Convert to an `IpAddress`.
+    ///
+    /// Same as `.into()`, but works in `const`.
+    pub const fn into_address(self) -> super::IpAddress {
+        super::IpAddress::Ipv6(self)
     }
 }
 
@@ -238,7 +245,7 @@ impl fmt::Display for Address {
                     State::Tail
                 }
                 // Continue iterating without writing any characters until
-                // we hit anothing non-zero value.
+                // we hit a non-zero value.
                 (0, &State::Tail) => State::Tail,
                 // When the state is Head or Tail write a u16 in hexadecimal
                 // without the leading colon if the value is not 0.
@@ -324,8 +331,7 @@ impl Cidr {
             return true;
         }
 
-        let shift = 128 - self.prefix_len;
-        self.address.mask(shift) == addr.mask(shift)
+        self.address.mask(self.prefix_len) == addr.mask(self.prefix_len)
     }
 
     /// Query whether the subnetwork described by this IPV6 CIDR block contains
@@ -343,7 +349,7 @@ impl fmt::Display for Cidr {
 }
 
 /// A read/write wrapper around an Internet Protocol version 6 packet buffer.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Packet<T: AsRef<[u8]>> {
     buffer: T,
@@ -416,7 +422,7 @@ impl<T: AsRef<[u8]>> Packet<T> {
     }
 
     /// Ensure that no accessor method will panic if called.
-    /// Returns `Err(Error::Truncated)` if the buffer is too short.
+    /// Returns `Err(Error)` if the buffer is too short.
     ///
     /// The result of this check is invalidated by calling [set_payload_len].
     ///
@@ -425,7 +431,7 @@ impl<T: AsRef<[u8]>> Packet<T> {
     pub fn check_len(&self) -> Result<()> {
         let len = self.buffer.as_ref().len();
         if len < field::DST_ADDR.end || len < self.total_len() {
-            Err(Error::Truncated)
+            Err(Error)
         } else {
             Ok(())
         }
@@ -633,7 +639,7 @@ impl Repr {
         // Ensure basic accessors will work
         packet.check_len()?;
         if packet.version() != 6 {
-            return Err(Error::Malformed);
+            return Err(Error);
         }
         Ok(Repr {
             src_addr: packet.src_addr(),
@@ -702,10 +708,10 @@ impl<T: AsRef<[u8]>> PrettyPrint for Packet<T> {
 
 #[cfg(test)]
 mod test {
+    use super::Error;
     use super::{Address, Cidr};
     use super::{Packet, Protocol, Repr};
     use crate::wire::pretty_print::PrettyPrinter;
-    use crate::Error;
 
     #[cfg(feature = "proto-ipv4")]
     use crate::wire::ipv4::Address as Ipv4Address;
@@ -875,21 +881,28 @@ mod test {
 
     #[test]
     fn test_cidr() {
-        let cidr = Cidr::new(LINK_LOCAL_ADDR, 64);
+        // fe80::1/56
+        // 0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        let cidr = Cidr::new(LINK_LOCAL_ADDR, 56);
 
         let inside_subnet = [
+            // fe80::2
             [
                 0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x02,
             ],
+            // fe80::1122:3344:5566:7788
             [
                 0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
                 0x77, 0x88,
             ],
+            // fe80::ff00:0:0:0
             [
                 0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00,
             ],
+            // fe80::ff
             [
                 0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0xff,
@@ -897,18 +910,22 @@ mod test {
         ];
 
         let outside_subnet = [
+            // fe80:0:0:101::1
             [
-                0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x01,
             ],
+            // ::1
             [
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x01,
             ],
+            // ff02::1
             [
                 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x01,
             ],
+            // ff02::2
             [
                 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x02,
@@ -916,6 +933,7 @@ mod test {
         ];
 
         let subnets = [
+            // fe80::ffff:ffff:ffff:ffff/65
             (
                 [
                     0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -923,6 +941,7 @@ mod test {
                 ],
                 65,
             ),
+            // fe80::1/128
             (
                 [
                     0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -930,6 +949,7 @@ mod test {
                 ],
                 128,
             ),
+            // fe80::1234:5678/96
             (
                 [
                     0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
@@ -940,27 +960,31 @@ mod test {
         ];
 
         let not_subnets = [
+            // fe80::101:ffff:ffff:ffff:ffff/55
             (
                 [
-                    0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff,
                     0xff, 0xff, 0xff,
                 ],
-                63,
+                55,
             ),
+            // fe80::101:ffff:ffff:ffff:ffff/56
             (
                 [
-                    0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff,
                     0xff, 0xff, 0xff,
                 ],
-                64,
+                56,
             ),
+            // fe80::101:ffff:ffff:ffff:ffff/57
             (
                 [
-                    0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff,
                     0xff, 0xff, 0xff,
                 ],
-                65,
+                57,
             ),
+            // ::1/128
             (
                 [
                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1079,7 +1103,7 @@ mod test {
         let start = expected_bytes.len() - REPR_PAYLOAD_BYTES.len();
         expected_bytes[start..].copy_from_slice(&REPR_PAYLOAD_BYTES[..]);
         assert_eq!(packet.check_len(), Ok(()));
-        assert_eq!(&packet.into_inner()[..], &expected_bytes[..]);
+        assert_eq!(&*packet.into_inner(), &expected_bytes[..]);
     }
 
     #[test]
@@ -1104,7 +1128,7 @@ mod test {
         bytes.extend(&REPR_PACKET_BYTES[..]);
         Packet::new_unchecked(&mut bytes).set_payload_len(0x80);
 
-        assert_eq!(Packet::new_checked(&bytes).unwrap_err(), Error::Truncated);
+        assert_eq!(Packet::new_checked(&bytes).unwrap_err(), Error);
     }
 
     #[test]
@@ -1121,7 +1145,7 @@ mod test {
         packet.set_version(4);
         packet.set_payload_len(0);
         let packet = Packet::new_unchecked(&*packet.into_inner());
-        assert_eq!(Repr::parse(&packet), Err(Error::Malformed));
+        assert_eq!(Repr::parse(&packet), Err(Error));
     }
 
     #[test]
@@ -1131,7 +1155,7 @@ mod test {
         packet.set_version(6);
         packet.set_payload_len(39);
         let packet = Packet::new_unchecked(&*packet.into_inner());
-        assert_eq!(Repr::parse(&packet), Err(Error::Truncated));
+        assert_eq!(Repr::parse(&packet), Err(Error));
     }
 
     #[test]
@@ -1141,7 +1165,7 @@ mod test {
         packet.set_version(6);
         packet.set_payload_len(1);
         let packet = Packet::new_unchecked(&*packet.into_inner());
-        assert_eq!(Repr::parse(&packet), Err(Error::Truncated));
+        assert_eq!(Repr::parse(&packet), Err(Error));
     }
 
     #[test]
@@ -1151,7 +1175,7 @@ mod test {
         let mut packet = Packet::new_unchecked(&mut bytes);
         repr.emit(&mut packet);
         packet.payload_mut().copy_from_slice(&REPR_PAYLOAD_BYTES);
-        assert_eq!(&packet.into_inner()[..], &REPR_PACKET_BYTES[..]);
+        assert_eq!(&*packet.into_inner(), &REPR_PACKET_BYTES[..]);
     }
 
     #[test]

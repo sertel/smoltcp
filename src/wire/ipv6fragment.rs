@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use super::{Error, Result};
 use core::fmt;
 
 use byteorder::{ByteOrder, NetworkEndian};
@@ -6,7 +6,7 @@ use byteorder::{ByteOrder, NetworkEndian};
 pub use super::IpProtocol as Protocol;
 
 /// A read/write wrapper around an IPv6 Fragment Header.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Header<T: AsRef<[u8]>> {
     buffer: T,
@@ -51,13 +51,13 @@ impl<T: AsRef<[u8]>> Header<T> {
     }
 
     /// Ensure that no accessor method will panic if called.
-    /// Returns `Err(Error::Truncated)` if the buffer is too short.
+    /// Returns `Err(Error)` if the buffer is too short.
     pub fn check_len(&self) -> Result<()> {
         let data = self.buffer.as_ref();
         let len = data.len();
 
         if len < field::IDENT.end {
-            Err(Error::Truncated)
+            Err(Error)
         } else {
             Ok(())
         }
@@ -166,7 +166,7 @@ pub struct Repr {
     /// The offset of the data following this header, relative to the start of the Fragmentable
     /// Part of the original packet.
     pub frag_offset: u16,
-    /// Whethere are not there are more fragments following this header
+    /// When there are more fragments following this header
     pub more_frags: bool,
     /// The identification for every packet that is fragmented.
     pub ident: u32,
@@ -202,7 +202,7 @@ impl Repr {
     }
 }
 
-impl<'a> fmt::Display for Repr {
+impl fmt::Display for Repr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -226,7 +226,7 @@ mod test {
     fn test_check_len() {
         // less than 8 bytes
         assert_eq!(
-            Err(Error::Truncated),
+            Err(Error),
             Header::new_unchecked(&BYTES_HEADER_MORE_FRAG[..7]).check_len()
         );
         // valid

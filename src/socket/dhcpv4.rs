@@ -1,27 +1,23 @@
+#[cfg(feature = "async")]
+use core::task::Waker;
+
 use crate::iface::Context;
 use crate::time::{Duration, Instant};
 use crate::wire::dhcpv4::field as dhcpv4_field;
-use crate::wire::HardwareAddress;
 use crate::wire::{
     DhcpMessageType, DhcpPacket, DhcpRepr, IpAddress, IpProtocol, Ipv4Address, Ipv4Cidr, Ipv4Repr,
     UdpRepr, DHCP_CLIENT_PORT, DHCP_MAX_DNS_SERVER_COUNT, DHCP_SERVER_PORT, UDP_HEADER_LEN,
 };
-use crate::{Error, Result};
+use crate::wire::{DhcpOption, HardwareAddress};
+
+#[cfg(feature = "async")]
+use super::WakerRegistration;
 
 use super::PollAt;
 
-const DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
-
-// timeout doubles every 2 tries.
-// total time 5 + 5 + 10 + 10 + 20 = 50s
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_RETRIES: u16 = 5;
-
-const MIN_RENEW_TIMEOUT: Duration = Duration::from_secs(60);
-
 const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(120);
 
-const PARAMETER_REQUEST_LIST: &[u8] = &[
+const DEFAULT_PARAMETER_REQUEST_LIST: &[u8] = &[
     dhcpv4_field::OPT_SUBNET_MASK,
     dhcpv4_field::OPT_ROUTER,
     dhcpv4_field::OPT_DOMAIN_NAME_SERVER,
@@ -30,7 +26,10 @@ const PARAMETER_REQUEST_LIST: &[u8] = &[
 /// IPv4 configuration data provided by the DHCP server.
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Config {
+pub struct Config<'a> {
+    /// Information on how to reach the DHCP server that responded with DHCP
+    /// configuration.
+    pub server: ServerInfo,
     /// IP address
     pub address: Ipv4Cidr,
     /// Router address, also known as default gateway. Does not necessarily
@@ -38,17 +37,19 @@ pub struct Config {
     pub router: Option<Ipv4Address>,
     /// DNS servers
     pub dns_servers: [Option<Ipv4Address>; DHCP_MAX_DNS_SERVER_COUNT],
+    /// Received DHCP packet
+    pub packet: Option<DhcpPacket<&'a [u8]>>,
 }
 
 /// Information on how to reach a DHCP server.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-struct ServerInfo {
+pub struct ServerInfo {
     /// IP address to use as destination in outgoing packets
-    address: Ipv4Address,
+    pub address: Ipv4Address,
     /// Server identifier to use in outgoing packets. Usually equal to server_address,
     /// but may differ in some situations (eg DHCP relays)
-    identifier: Ipv4Address,
+    pub identifier: Ipv4Address,
 }
 
 #[derive(Debug)]
@@ -74,10 +75,8 @@ struct RequestState {
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct RenewState {
-    /// Server that gave us the lease
-    server: ServerInfo,
     /// Active network config
-    config: Config,
+    config: Config<'static>,
 
     /// Renew timer. When reached, we will start attempting
     /// to renew this lease with the DHCP server.
@@ -99,18 +98,40 @@ enum ClientState {
     Renewing(RenewState),
 }
 
+/// Timeout and retry configuration.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct RetryConfig {
+    pub discover_timeout: Duration,
+    /// The REQUEST timeout doubles every 2 tries.
+    pub initial_request_timeout: Duration,
+    pub request_retries: u16,
+    pub min_renew_timeout: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            discover_timeout: Duration::from_secs(10),
+            initial_request_timeout: Duration::from_secs(5),
+            request_retries: 5,
+            min_renew_timeout: Duration::from_secs(60),
+        }
+    }
+}
+
 /// Return value for the `Dhcpv4Socket::poll` function
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Event {
+pub enum Event<'a> {
     /// Configuration has been lost (for example, the lease has expired)
     Deconfigured,
     /// Configuration has been newly acquired, or modified.
-    Configured(Config),
+    Configured(Config<'a>),
 }
 
 #[derive(Debug)]
-pub struct Dhcpv4Socket {
+pub struct Socket<'a> {
     /// State of the DHCP client.
     state: ClientState,
     /// Set to true on config/state change, cleared back to false by the `config` function.
@@ -122,8 +143,23 @@ pub struct Dhcpv4Socket {
     /// Useful to react faster to IP configuration changes and to test whether renews work correctly.
     max_lease_duration: Option<Duration>,
 
+    retry_config: RetryConfig,
+
     /// Ignore NAKs.
     ignore_naks: bool,
+
+    /// A buffer contains options additional to be added to outgoing DHCP
+    /// packets.
+    outgoing_options: &'a [DhcpOption<'a>],
+    /// A buffer containing all requested parameters.
+    parameter_request_list: Option<&'a [u8]>,
+
+    /// Incoming DHCP packets are copied into this buffer, overwriting the previous.
+    receive_packet_buffer: Option<&'a mut [u8]>,
+
+    /// Waker registration
+    #[cfg(feature = "async")]
+    waker: WakerRegistration,
 }
 
 /// DHCP client socket.
@@ -131,19 +167,48 @@ pub struct Dhcpv4Socket {
 /// The socket acquires an IP address configuration through DHCP autonomously.
 /// You must query the configuration with `.poll()` after every call to `Interface::poll()`,
 /// and apply the configuration to the `Interface`.
-impl Dhcpv4Socket {
+impl<'a> Socket<'a> {
     /// Create a DHCPv4 socket
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Dhcpv4Socket {
+        Socket {
             state: ClientState::Discovering(DiscoverState {
                 retry_at: Instant::from_millis(0),
             }),
             config_changed: true,
             transaction_id: 1,
             max_lease_duration: None,
+            retry_config: RetryConfig::default(),
             ignore_naks: false,
+            outgoing_options: &[],
+            parameter_request_list: None,
+            receive_packet_buffer: None,
+            #[cfg(feature = "async")]
+            waker: WakerRegistration::new(),
         }
+    }
+
+    /// Set the retry/timeouts configuration.
+    pub fn set_retry_config(&mut self, config: RetryConfig) {
+        self.retry_config = config;
+    }
+
+    /// Set the outgoing options.
+    pub fn set_outgoing_options(&mut self, options: &'a [DhcpOption<'a>]) {
+        self.outgoing_options = options;
+    }
+
+    /// Set the buffer into which incoming DHCP packets are copied into.
+    pub fn set_receive_packet_buffer(&mut self, buffer: &'a mut [u8]) {
+        self.receive_packet_buffer = Some(buffer);
+    }
+
+    /// Set the parameter request list.
+    ///
+    /// This should contain at least `OPT_SUBNET_MASK` (`1`), `OPT_ROUTER`
+    /// (`3`), and `OPT_DOMAIN_NAME_SERVER` (`6`).
+    pub fn set_parameter_request_list(&mut self, parameter_request_list: &'a [u8]) {
+        self.parameter_request_list = Some(parameter_request_list);
     }
 
     /// Get the configured max lease duration.
@@ -196,7 +261,7 @@ impl Dhcpv4Socket {
         ip_repr: &Ipv4Repr,
         repr: &UdpRepr,
         payload: &[u8],
-    ) -> Result<()> {
+    ) {
         let src_ip = ip_repr.src_addr;
 
         // This is enforced in interface.rs.
@@ -206,27 +271,26 @@ impl Dhcpv4Socket {
             Ok(dhcp_packet) => dhcp_packet,
             Err(e) => {
                 net_debug!("DHCP invalid pkt from {}: {:?}", src_ip, e);
-                return Ok(());
+                return;
             }
         };
         let dhcp_repr = match DhcpRepr::parse(&dhcp_packet) {
             Ok(dhcp_repr) => dhcp_repr,
             Err(e) => {
                 net_debug!("DHCP error parsing pkt from {}: {:?}", src_ip, e);
-                return Ok(());
+                return;
             }
         };
-        let hardware_addr = if let Some(HardwareAddress::Ethernet(addr)) = cx.hardware_addr() {
-            addr
-        } else {
-            return Err(Error::Malformed);
+        let hardware_addr = match cx.hardware_addr() {
+            Some(HardwareAddress::Ethernet(addr)) => addr,
+            _ => return,
         };
 
         if dhcp_repr.client_hardware_address != hardware_addr {
-            return Ok(());
+            return;
         }
         if dhcp_repr.transaction_id != self.transaction_id {
-            return Ok(());
+            return;
         }
         let server_identifier = match dhcp_repr.server_identifier {
             Some(server_identifier) => server_identifier,
@@ -235,7 +299,7 @@ impl Dhcpv4Socket {
                     "DHCP ignoring {:?} because missing server_identifier",
                     dhcp_repr.message_type
                 );
-                return Ok(());
+                return;
             }
         };
 
@@ -246,11 +310,18 @@ impl Dhcpv4Socket {
             dhcp_repr
         );
 
+        // Copy over the payload into the receive packet buffer.
+        if let Some(buffer) = self.receive_packet_buffer.as_mut() {
+            if let Some(buffer) = buffer.get_mut(..payload.len()) {
+                buffer.copy_from_slice(payload);
+            }
+        }
+
         match (&mut self.state, dhcp_repr.message_type) {
             (ClientState::Discovering(_state), DhcpMessageType::Offer) => {
                 if !dhcp_repr.your_ip.is_unicast() {
                     net_debug!("DHCP ignoring OFFER because your_ip is not unicast");
-                    return Ok(());
+                    return;
                 }
 
                 self.state = ClientState::Requesting(RequestState {
@@ -265,15 +336,14 @@ impl Dhcpv4Socket {
             }
             (ClientState::Requesting(state), DhcpMessageType::Ack) => {
                 if let Some((config, renew_at, expires_at)) =
-                    Self::parse_ack(cx.now(), &dhcp_repr, self.max_lease_duration)
+                    Self::parse_ack(cx.now(), &dhcp_repr, self.max_lease_duration, state.server)
                 {
-                    self.config_changed = true;
                     self.state = ClientState::Renewing(RenewState {
-                        server: state.server,
                         config,
                         renew_at,
                         expires_at,
                     });
+                    self.config_changed();
                 }
             }
             (ClientState::Requesting(_), DhcpMessageType::Nak) => {
@@ -282,14 +352,17 @@ impl Dhcpv4Socket {
                 }
             }
             (ClientState::Renewing(state), DhcpMessageType::Ack) => {
-                if let Some((config, renew_at, expires_at)) =
-                    Self::parse_ack(cx.now(), &dhcp_repr, self.max_lease_duration)
-                {
+                if let Some((config, renew_at, expires_at)) = Self::parse_ack(
+                    cx.now(),
+                    &dhcp_repr,
+                    self.max_lease_duration,
+                    state.config.server,
+                ) {
                     state.renew_at = renew_at;
                     state.expires_at = expires_at;
                     if state.config != config {
-                        self.config_changed = true;
                         state.config = config;
+                        self.config_changed();
                     }
                 }
             }
@@ -305,15 +378,14 @@ impl Dhcpv4Socket {
                 );
             }
         }
-
-        Ok(())
     }
 
     fn parse_ack(
         now: Instant,
         dhcp_repr: &DhcpRepr,
         max_lease_duration: Option<Duration>,
-    ) -> Option<(Config, Instant, Instant)> {
+        server: ServerInfo,
+    ) -> Option<(Config<'static>, Instant, Instant)> {
         let subnet_mask = match dhcp_repr.subnet_mask {
             Some(subnet_mask) => subnet_mask,
             None => {
@@ -357,9 +429,11 @@ impl Dhcpv4Socket {
             }
         }
         let config = Config {
+            server,
             address: Ipv4Cidr::new(dhcp_repr.your_ip, prefix_len),
             router: dhcp_repr.router,
-            dns_servers: dns_servers,
+            dns_servers,
+            packet: None,
         };
 
         // RFC 2131 indicates clients should renew a lease halfway through its expiration.
@@ -379,16 +453,16 @@ impl Dhcpv4Socket {
         0x12345678
     }
 
-    pub(crate) fn dispatch<F>(&mut self, cx: &mut Context, emit: F) -> Result<()>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
     where
-        F: FnOnce(&mut Context, (Ipv4Repr, UdpRepr, DhcpRepr)) -> Result<()>,
+        F: FnOnce(&mut Context, (Ipv4Repr, UdpRepr, DhcpRepr)) -> Result<(), E>,
     {
         // note: Dhcpv4Socket is only usable in ethernet mediums, so the
         // unwrap can never fail.
         let ethernet_addr = if let Some(HardwareAddress::Ethernet(addr)) = cx.hardware_addr() {
             addr
         } else {
-            return Err(Error::Malformed);
+            panic!("using DHCPv4 socket with a non-ethernet hardware address.");
         };
 
         // Worst case biggest IPv4 header length.
@@ -402,6 +476,7 @@ impl Dhcpv4Socket {
         let mut dhcp_repr = DhcpRepr {
             message_type: DhcpMessageType::Discover,
             transaction_id: next_transaction_id,
+            secs: 0,
             client_hardware_address: ethernet_addr,
             client_ip: Ipv4Address::UNSPECIFIED,
             your_ip: Ipv4Address::UNSPECIFIED,
@@ -413,10 +488,14 @@ impl Dhcpv4Socket {
             requested_ip: None,
             client_identifier: Some(ethernet_addr),
             server_identifier: None,
-            parameter_request_list: Some(PARAMETER_REQUEST_LIST),
+            parameter_request_list: Some(
+                self.parameter_request_list
+                    .unwrap_or(DEFAULT_PARAMETER_REQUEST_LIST),
+            ),
             max_size: Some((cx.ip_mtu() - MAX_IPV4_HEADER_LEN - UDP_HEADER_LEN) as u16),
             lease_duration: None,
             dns_servers: None,
+            additional_options: self.outgoing_options,
         };
 
         let udp_repr = UdpRepr {
@@ -427,7 +506,7 @@ impl Dhcpv4Socket {
         let mut ipv4_repr = Ipv4Repr {
             src_addr: Ipv4Address::UNSPECIFIED,
             dst_addr: Ipv4Address::BROADCAST,
-            protocol: IpProtocol::Udp,
+            next_header: IpProtocol::Udp,
             payload_len: 0, // filled right before emit
             hop_limit: 64,
         };
@@ -435,7 +514,7 @@ impl Dhcpv4Socket {
         match &mut self.state {
             ClientState::Discovering(state) => {
                 if cx.now() < state.retry_at {
-                    return Err(Error::Exhausted);
+                    return Ok(());
                 }
 
                 // send packet
@@ -448,19 +527,18 @@ impl Dhcpv4Socket {
                 emit(cx, (ipv4_repr, udp_repr, dhcp_repr))?;
 
                 // Update state AFTER the packet has been successfully sent.
-                state.retry_at = cx.now() + DISCOVER_TIMEOUT;
+                state.retry_at = cx.now() + self.retry_config.discover_timeout;
                 self.transaction_id = next_transaction_id;
                 Ok(())
             }
             ClientState::Requesting(state) => {
                 if cx.now() < state.retry_at {
-                    return Err(Error::Exhausted);
+                    return Ok(());
                 }
 
-                if state.retry >= REQUEST_RETRIES {
+                if state.retry >= self.retry_config.request_retries {
                     net_debug!("DHCP request retries exceeded, restarting discovery");
                     self.reset();
-                    // return Ok so we get polled again
                     return Ok(());
                 }
 
@@ -477,7 +555,8 @@ impl Dhcpv4Socket {
                 emit(cx, (ipv4_repr, udp_repr, dhcp_repr))?;
 
                 // Exponential backoff: Double every 2 retries.
-                state.retry_at = cx.now() + (REQUEST_TIMEOUT << (state.retry as u32 / 2));
+                state.retry_at = cx.now()
+                    + (self.retry_config.initial_request_timeout << (state.retry as u32 / 2));
                 state.retry += 1;
 
                 self.transaction_id = next_transaction_id;
@@ -492,11 +571,11 @@ impl Dhcpv4Socket {
                 }
 
                 if cx.now() < state.renew_at {
-                    return Err(Error::Exhausted);
+                    return Ok(());
                 }
 
                 ipv4_repr.src_addr = state.config.address.address();
-                ipv4_repr.dst_addr = state.server.address;
+                ipv4_repr.dst_addr = state.config.server.address;
                 dhcp_repr.message_type = DhcpMessageType::Request;
                 dhcp_repr.client_ip = state.config.address.address();
 
@@ -509,8 +588,11 @@ impl Dhcpv4Socket {
                 // of the remaining time until T2 (in RENEWING state) and one-half of
                 // the remaining lease time (in REBINDING state), down to a minimum of
                 // 60 seconds, before retransmitting the DHCPREQUEST message.
-                state.renew_at =
-                    cx.now() + MIN_RENEW_TIMEOUT.max((state.expires_at - cx.now()) / 2);
+                state.renew_at = cx.now()
+                    + self
+                        .retry_config
+                        .min_renew_timeout
+                        .max((state.expires_at - cx.now()) / 2);
 
                 self.transaction_id = next_transaction_id;
                 Ok(())
@@ -525,7 +607,7 @@ impl Dhcpv4Socket {
     pub fn reset(&mut self) {
         net_trace!("DHCP reset");
         if let ClientState::Renewing(_) = &self.state {
-            self.config_changed = true;
+            self.config_changed();
         }
         self.state = ClientState::Discovering(DiscoverState {
             retry_at: Instant::from_millis(0),
@@ -541,11 +623,45 @@ impl Dhcpv4Socket {
             None
         } else if let ClientState::Renewing(state) = &self.state {
             self.config_changed = false;
-            Some(Event::Configured(state.config))
+            Some(Event::Configured(Config {
+                server: state.config.server,
+                address: state.config.address,
+                router: state.config.router,
+                dns_servers: state.config.dns_servers,
+                packet: self
+                    .receive_packet_buffer
+                    .as_deref()
+                    .map(DhcpPacket::new_unchecked),
+            }))
         } else {
             self.config_changed = false;
             Some(Event::Deconfigured)
         }
+    }
+
+    /// This function _must_ be called when the configuration provided to the
+    /// interface, by this DHCP socket, changes. It will update the `config_changed` field
+    /// so that a subsequent call to `poll` will yield an event, and wake a possible waker.
+    pub(crate) fn config_changed(&mut self) {
+        self.config_changed = true;
+        #[cfg(feature = "async")]
+        self.waker.wake();
+    }
+
+    /// Register a waker.
+    ///
+    /// The waker is woken on state changes that might affect the return value
+    /// of `poll` method calls, which indicates a new state in the DHCP configuration
+    /// provided by this DHCP socket.
+    ///
+    /// Notes:
+    ///
+    /// - Only one waker can be registered at a time. If another waker was previously registered,
+    ///   it is overwritten and will no longer be woken.
+    /// - The Waker is woken only once. Once woken, you must register it again to receive more wakes.
+    #[cfg(feature = "async")]
+    pub fn register_waker(&mut self, waker: &Waker) {
+        self.waker.register(waker)
     }
 }
 
@@ -556,17 +672,18 @@ mod test {
 
     use super::*;
     use crate::wire::EthernetAddress;
+    use crate::Error;
 
     // =========================================================================================//
     // Helper functions
 
     struct TestSocket {
-        socket: Dhcpv4Socket,
+        socket: Socket<'static>,
         cx: Context<'static>,
     }
 
     impl Deref for TestSocket {
-        type Target = Dhcpv4Socket;
+        type Target = Socket<'static>;
         fn deref(&self) -> &Self::Target {
             &self.socket
         }
@@ -582,7 +699,7 @@ mod test {
         s: &mut TestSocket,
         timestamp: Instant,
         (ip_repr, udp_repr, dhcp_repr): (Ipv4Repr, UdpRepr, DhcpRepr),
-    ) -> Result<()> {
+    ) {
         s.cx.set_now(timestamp);
 
         net_trace!("send: {:?}", ip_repr);
@@ -606,7 +723,7 @@ mod test {
             let _ = s
                 .socket
                 .dispatch(&mut s.cx, |_, (mut ip_repr, udp_repr, dhcp_repr)| {
-                    assert_eq!(ip_repr.protocol, IpProtocol::Udp);
+                    assert_eq!(ip_repr.next_header, IpProtocol::Udp);
                     assert_eq!(
                         ip_repr.payload_len,
                         udp_repr.header_len() + dhcp_repr.buffer_len()
@@ -625,7 +742,7 @@ mod test {
                         None => panic!("Too many reprs emitted"),
                     }
                     i += 1;
-                    Ok(())
+                    Ok::<_, Error>(())
                 });
         }
 
@@ -635,12 +752,8 @@ mod test {
     macro_rules! send {
         ($socket:ident, $repr:expr) =>
             (send!($socket, time 0, $repr));
-        ($socket:ident, $repr:expr, $result:expr) =>
-            (send!($socket, time 0, $repr, $result));
         ($socket:ident, time $time:expr, $repr:expr) =>
-            (send!($socket, time $time, $repr, Ok(( ))));
-        ($socket:ident, time $time:expr, $repr:expr, $result:expr) =>
-            (assert_eq!(send(&mut $socket, Instant::from_millis($time), $repr), $result));
+            (send(&mut $socket, Instant::from_millis($time), $repr));
     }
 
     macro_rules! recv {
@@ -671,7 +784,7 @@ mod test {
     const IP_BROADCAST: Ipv4Repr = Ipv4Repr {
         src_addr: Ipv4Address::UNSPECIFIED,
         dst_addr: Ipv4Address::BROADCAST,
-        protocol: IpProtocol::Udp,
+        next_header: IpProtocol::Udp,
         payload_len: 0,
         hop_limit: 64,
     };
@@ -679,7 +792,7 @@ mod test {
     const IP_SERVER_BROADCAST: Ipv4Repr = Ipv4Repr {
         src_addr: SERVER_IP,
         dst_addr: Ipv4Address::BROADCAST,
-        protocol: IpProtocol::Udp,
+        next_header: IpProtocol::Udp,
         payload_len: 0,
         hop_limit: 64,
     };
@@ -687,7 +800,7 @@ mod test {
     const IP_RECV: Ipv4Repr = Ipv4Repr {
         src_addr: SERVER_IP,
         dst_addr: MY_IP,
-        protocol: IpProtocol::Udp,
+        next_header: IpProtocol::Udp,
         payload_len: 0,
         hop_limit: 64,
     };
@@ -695,7 +808,7 @@ mod test {
     const IP_SEND: Ipv4Repr = Ipv4Repr {
         src_addr: MY_IP,
         dst_addr: SERVER_IP,
-        protocol: IpProtocol::Udp,
+        next_header: IpProtocol::Udp,
         payload_len: 0,
         hop_limit: 64,
     };
@@ -712,6 +825,7 @@ mod test {
     const DHCP_DEFAULT: DhcpRepr = DhcpRepr {
         message_type: DhcpMessageType::Unknown(99),
         transaction_id: TXID,
+        secs: 0,
         client_hardware_address: MY_MAC,
         client_ip: Ipv4Address::UNSPECIFIED,
         your_ip: Ipv4Address::UNSPECIFIED,
@@ -727,6 +841,7 @@ mod test {
         dns_servers: None,
         max_size: None,
         lease_duration: None,
+        additional_options: &[],
     };
 
     const DHCP_DISCOVER: DhcpRepr = DhcpRepr {
@@ -799,7 +914,7 @@ mod test {
     // Tests
 
     fn socket() -> TestSocket {
-        let mut s = Dhcpv4Socket::new();
+        let mut s = Socket::new();
         assert_eq!(s.poll(), Some(Event::Deconfigured));
         TestSocket {
             socket: s,
@@ -811,13 +926,14 @@ mod test {
         let mut s = socket();
         s.state = ClientState::Renewing(RenewState {
             config: Config {
+                server: ServerInfo {
+                    address: SERVER_IP,
+                    identifier: SERVER_IP,
+                },
                 address: Ipv4Cidr::new(MY_IP, 24),
                 dns_servers: DNS_IPS,
                 router: Some(SERVER_IP),
-            },
-            server: ServerInfo {
-                address: SERVER_IP,
-                identifier: SERVER_IP,
+                packet: None,
             },
             renew_at: Instant::from_secs(500),
             expires_at: Instant::from_secs(1000),
@@ -841,9 +957,14 @@ mod test {
         assert_eq!(
             s.poll(),
             Some(Event::Configured(Config {
+                server: ServerInfo {
+                    address: SERVER_IP,
+                    identifier: SERVER_IP,
+                },
                 address: Ipv4Cidr::new(MY_IP, 24),
                 dns_servers: DNS_IPS,
                 router: Some(SERVER_IP),
+                packet: None,
             }))
         );
 

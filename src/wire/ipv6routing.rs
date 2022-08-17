@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use super::{Error, Result};
 use core::fmt;
 
 use crate::wire::IpProtocol as Protocol;
@@ -50,7 +50,7 @@ impl fmt::Display for Type {
 }
 
 /// A read/write wrapper around an IPv6 Routing Header buffer.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Header<T: AsRef<[u8]>> {
     buffer: T,
@@ -92,8 +92,8 @@ mod field {
     // Length of the header is in 8-octet units, not including the first 8 octets. The first four
     // octets are the next header type, the header length, routing type and segments left.
     pub fn DATA(length_field: u8) -> Field {
-        let bytes = length_field * 8 + 8;
-        4..bytes as usize
+        let bytes = length_field as usize * 8 + 8;
+        4..bytes
     }
 
     // The Type 2 Routing Header has the following format:
@@ -158,7 +158,7 @@ impl<T: AsRef<[u8]>> Header<T> {
     }
 
     /// Ensure that no accessor method will panic if called.
-    /// Returns `Err(Error::Truncated)` if the buffer is too short.
+    /// Returns `Err(Error)` if the buffer is too short.
     ///
     /// The result of this check is invalidated by calling [set_header_len].
     ///
@@ -166,11 +166,18 @@ impl<T: AsRef<[u8]>> Header<T> {
     pub fn check_len(&self) -> Result<()> {
         let len = self.buffer.as_ref().len();
         if len < field::MIN_HEADER_SIZE {
-            return Err(Error::Truncated);
+            return Err(Error);
         }
 
         if len < field::DATA(self.header_len()).end as usize {
-            return Err(Error::Truncated);
+            return Err(Error);
+        }
+
+        // The header lenght field could be wrong and thus we need to check this as well:
+        if matches!(self.routing_type(), Type::Type2)
+            && field::DATA(self.header_len()).end != field::HOME_ADDRESS.end
+        {
+            return Err(Error);
         }
 
         Ok(())
@@ -225,7 +232,7 @@ impl<T: AsRef<[u8]>> Header<T> {
 
 /// Getter methods for the RPL Source Routing Header routing type.
 impl<T: AsRef<[u8]>> Header<T> {
-    /// Return the number of prefix octects elided from addresses[1..n-1].
+    /// Return the number of prefix octets elided from addresses[1..n-1].
     ///
     /// # Panics
     /// This function may panic if this header is not the RPL Source Routing Header routing type.
@@ -234,7 +241,7 @@ impl<T: AsRef<[u8]>> Header<T> {
         data[field::CMPR] >> 4
     }
 
-    /// Return the number of prefix octects elided from the last address (`addresses[n]`).
+    /// Return the number of prefix octets elided from the last address (`addresses[n]`).
     ///
     /// # Panics
     /// This function may panic if this header is not the RPL Source Routing Header routing type.
@@ -243,7 +250,7 @@ impl<T: AsRef<[u8]>> Header<T> {
         data[field::CMPR] & 0xf
     }
 
-    /// Return the number of octects used for padding after `addresses[n]`.
+    /// Return the number of octets used for padding after `addresses[n]`.
     ///
     /// # Panics
     /// This function may panic if this header is not the RPL Source Routing Header routing type.
@@ -334,7 +341,7 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> Header<T> {
 
 /// Setter methods for the RPL Source Routing Header routing type.
 impl<T: AsRef<[u8]> + AsMut<[u8]>> Header<T> {
-    /// Set the number of prefix octects elided from addresses[1..n-1].
+    /// Set the number of prefix octets elided from addresses[1..n-1].
     ///
     /// # Panics
     /// This function may panic if this header is not the RPL Source Routing Header routing type.
@@ -344,7 +351,7 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> Header<T> {
         data[field::CMPR] = raw;
     }
 
-    /// Set the number of prefix octects elided from the last address (`addresses[n]`).
+    /// Set the number of prefix octets elided from the last address (`addresses[n]`).
     ///
     /// # Panics
     /// This function may panic if this header is not the RPL Source Routing Header routing type.
@@ -354,7 +361,7 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> Header<T> {
         data[field::CMPR] = raw;
     }
 
-    /// Set the number of octects used for padding after `addresses[n]`.
+    /// Set the number of octets used for padding after `addresses[n]`.
     ///
     /// # Panics
     /// This function may panic if this header is not the RPL Source Routing Header routing type.
@@ -444,7 +451,7 @@ impl<'a> Repr<'a> {
                 addresses: header.addresses(),
             }),
 
-            _ => Err(Error::Unrecognized),
+            _ => Err(Error),
         }
     }
 
@@ -588,31 +595,13 @@ mod test {
     #[test]
     fn test_check_len() {
         // less than min header size
-        assert_eq!(
-            Err(Error::Truncated),
-            Header::new(&BYTES_TYPE2[..3]).check_len()
-        );
-        assert_eq!(
-            Err(Error::Truncated),
-            Header::new(&BYTES_SRH_FULL[..3]).check_len()
-        );
-        assert_eq!(
-            Err(Error::Truncated),
-            Header::new(&BYTES_SRH_ELIDED[..3]).check_len()
-        );
-        // less than specfied length field
-        assert_eq!(
-            Err(Error::Truncated),
-            Header::new(&BYTES_TYPE2[..23]).check_len()
-        );
-        assert_eq!(
-            Err(Error::Truncated),
-            Header::new(&BYTES_SRH_FULL[..39]).check_len()
-        );
-        assert_eq!(
-            Err(Error::Truncated),
-            Header::new(&BYTES_SRH_ELIDED[..11]).check_len()
-        );
+        assert_eq!(Err(Error), Header::new(&BYTES_TYPE2[..3]).check_len());
+        assert_eq!(Err(Error), Header::new(&BYTES_SRH_FULL[..3]).check_len());
+        assert_eq!(Err(Error), Header::new(&BYTES_SRH_ELIDED[..3]).check_len());
+        // less than specified length field
+        assert_eq!(Err(Error), Header::new(&BYTES_TYPE2[..23]).check_len());
+        assert_eq!(Err(Error), Header::new(&BYTES_SRH_FULL[..39]).check_len());
+        assert_eq!(Err(Error), Header::new(&BYTES_SRH_ELIDED[..11]).check_len());
         // valid
         assert_eq!(Ok(()), Header::new(&BYTES_TYPE2[..]).check_len());
         assert_eq!(Ok(()), Header::new(&BYTES_SRH_FULL[..]).check_len());

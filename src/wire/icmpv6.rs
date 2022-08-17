@@ -1,13 +1,13 @@
 use byteorder::{ByteOrder, NetworkEndian};
 use core::{cmp, fmt};
 
+use super::{Error, Result};
 use crate::phy::ChecksumCapabilities;
 use crate::wire::ip::checksum;
 use crate::wire::MldRepr;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use crate::wire::NdiscRepr;
 use crate::wire::{IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr};
-use crate::{Error, Result};
 
 enum_with_unknown! {
     /// Internet protocol control message type.
@@ -183,7 +183,7 @@ impl fmt::Display for TimeExceeded {
 }
 
 /// A read/write wrapper around an Internet Control Message Protocol version 6 packet buffer.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Packet<T: AsRef<[u8]>> {
     pub(super) buffer: T,
@@ -262,11 +262,11 @@ impl<T: AsRef<[u8]>> Packet<T> {
     }
 
     /// Ensure that no accessor method will panic if called.
-    /// Returns `Err(Error::Truncated)` if the buffer is too short.
+    /// Returns `Err(Error)` if the buffer is too short.
     pub fn check_len(&self) -> Result<()> {
         let len = self.buffer.as_ref().len();
         if len < field::HEADER_END || len < self.header_len() {
-            Err(Error::Truncated)
+            Err(Error)
         } else {
             Ok(())
         }
@@ -557,7 +557,7 @@ impl<'a> Repr<'a> {
 
             let payload = &packet.payload()[ip_packet.header_len() as usize..];
             if payload.len() < 8 {
-                return Err(Error::Truncated);
+                return Err(Error);
             }
             let repr = Ipv6Repr {
                 src_addr: ip_packet.src_addr(),
@@ -570,7 +570,7 @@ impl<'a> Repr<'a> {
         }
         // Valid checksum is expected.
         if checksum_caps.icmpv6.rx() && !packet.verify_checksum(src_addr, dst_addr) {
-            return Err(Error::Checksum);
+            return Err(Error);
         }
 
         match (packet.msg_type(), packet.msg_code()) {
@@ -620,7 +620,7 @@ impl<'a> Repr<'a> {
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
             (msg_type, 0) if msg_type.is_ndisc() => NdiscRepr::parse(packet).map(Repr::Ndisc),
             (msg_type, 0) if msg_type.is_mld() => MldRepr::parse(packet).map(Repr::Mld),
-            _ => Err(Error::Unrecognized),
+            _ => Err(Error),
         }
     }
 
@@ -828,7 +828,7 @@ mod test {
             .payload_mut()
             .copy_from_slice(&ECHO_PACKET_PAYLOAD[..]);
         packet.fill_checksum(&MOCK_IP_ADDR_1, &MOCK_IP_ADDR_2);
-        assert_eq!(&packet.into_inner()[..], &ECHO_PACKET_BYTES[..]);
+        assert_eq!(&*packet.into_inner(), &ECHO_PACKET_BYTES[..]);
     }
 
     #[test]
@@ -855,7 +855,7 @@ mod test {
             &mut packet,
             &ChecksumCapabilities::default(),
         );
-        assert_eq!(&packet.into_inner()[..], &ECHO_PACKET_BYTES[..]);
+        assert_eq!(&*packet.into_inner(), &ECHO_PACKET_BYTES[..]);
     }
 
     #[test]
@@ -881,7 +881,7 @@ mod test {
             .payload_mut()
             .copy_from_slice(&PKT_TOO_BIG_IP_PAYLOAD[..]);
         packet.fill_checksum(&MOCK_IP_ADDR_1, &MOCK_IP_ADDR_2);
-        assert_eq!(&packet.into_inner()[..], &PKT_TOO_BIG_BYTES[..]);
+        assert_eq!(&*packet.into_inner(), &PKT_TOO_BIG_BYTES[..]);
     }
 
     #[test]
@@ -908,6 +908,6 @@ mod test {
             &mut packet,
             &ChecksumCapabilities::default(),
         );
-        assert_eq!(&packet.into_inner()[..], &PKT_TOO_BIG_BYTES[..]);
+        assert_eq!(&*packet.into_inner(), &PKT_TOO_BIG_BYTES[..]);
     }
 }

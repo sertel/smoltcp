@@ -4,7 +4,7 @@ The `time` module contains structures used to represent both
 absolute and relative time.
 
  - [Instant] is used to represent absolute time.
- - [Duration] is used to represet relative time.
+ - [Duration] is used to represent relative time.
 
 [Instant]: struct.Instant.html
 [Duration]: struct.Duration.html
@@ -28,6 +28,8 @@ pub struct Instant {
 }
 
 impl Instant {
+    pub const ZERO: Instant = Instant::from_micros_const(0);
+
     /// Create a new `Instant` from a number of microseconds.
     pub fn from_micros<T: Into<i64>>(micros: T) -> Instant {
         Instant {
@@ -164,7 +166,7 @@ impl ops::Sub<Instant> for Instant {
     type Output = Duration;
 
     fn sub(self, rhs: Instant) -> Duration {
-        Duration::from_micros((self.micros - rhs.micros).abs() as u64)
+        Duration::from_micros((self.micros - rhs.micros).unsigned_abs())
     }
 }
 
@@ -177,7 +179,7 @@ pub struct Duration {
 
 impl Duration {
     pub const ZERO: Duration = Duration::from_micros(0);
-    /// Create a new `Duration` from a number of microeconds.
+    /// Create a new `Duration` from a number of microseconds.
     pub const fn from_micros(micros: u64) -> Duration {
         Duration { micros }
     }
