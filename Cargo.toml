@@ -35,8 +35,8 @@ url = "2.0"
 
 
 [features]
-std = ["managed/std", "defmt?/alloc"]
-alloc = ["managed/alloc", "defmt?/alloc"]
+std = ["managed/std"]
+alloc = ["managed/alloc"]
 verbose = []
 "medium-ethernet" = ["socket"]
 "medium-ip" = ["socket"]

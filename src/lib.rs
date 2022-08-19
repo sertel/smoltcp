@@ -89,6 +89,7 @@ compile_error!("at least one socket needs to be enabled"); */
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 extern crate alloc;
+extern crate core;
 
 #[cfg(not(any(
     feature = "proto-ipv4",

@@ -1,4 +1,4 @@
-mod ohua_util;
+use ohua_util::*;
 
 use std::str;
 

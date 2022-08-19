@@ -1,10 +1,14 @@
+#![no_std] // ToDo: Inserted because Either is std by default, but do I need to?
 // Heads up! Before working on this file you should read, at least, RFC 793 and
 // the parts of RFC 1122 that discuss TCP. Consult RFC 7414 when implementing
 // a new feature.
 
+use core::fmt::Display;
 #[cfg(feature = "async")]
 use core::task::Waker;
 use core::{cmp, fmt, mem};
+use either::*;
+
 
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
@@ -12,11 +16,48 @@ use crate::socket::{OContext, PollAt};
 use crate::storage::{Assembler, RingBuffer};
 use crate::time::{Duration, Instant};
 use crate::wire::{
-    IpAddress, IpEndpoint, IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber, TCP_HEADER_LEN,
+    IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber,
+    TCP_HEADER_LEN,
 };
-#[cfg(feature = "ohua")]
+// ToDo : Remove all 'ohua'feature flags herre ...the whole thing is ohua-only
+// #[cfg(feature = "ohua")]
 use crate::wire::TcpReprP;
-use crate::{Error, Result};
+//use crate::{Error, Result};
+
+macro_rules! tcp_trace {
+    ($($arg:expr),*) => (net_log!(trace, $($arg),*));
+}
+
+/// Error returned by [`Socket::listen`]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ListenError {
+    InvalidState,
+    Unaddressable,
+}
+
+/// Error returned by [`Socket::connect`]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ConnectError {
+    InvalidState,
+    Unaddressable,
+}
+
+/// Error returned by [`Socket::send`]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum SendError {
+    InvalidState,
+}
+
+/// Error returned by [`Socket::recv`]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum RecvError {
+    InvalidState,
+    Finished,
+}
 
 /// A TCP socket ring buffer.
 pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
@@ -102,13 +143,13 @@ impl RttEstimator {
     fn sample(&mut self, new_rtt: u32) {
         // "Congestion Avoidance and Control", Van Jacobson, Michael J. Karels, 1988
         self.rtt = (self.rtt * 7 + new_rtt + 7) / 8;
-        let diff = (self.rtt as i32 - new_rtt as i32).abs() as u32;
+        let diff = (self.rtt as i32 - new_rtt as i32).unsigned_abs();
         self.deviation = (self.deviation * 3 + diff + 3) / 4;
 
         self.rto_count = 0;
 
         let rto = self.retransmission_timeout().total_millis();
-        net_trace!(
+        tcp_trace!(
             "rtte: sample={:?} rtt={:?} dev={:?} rto={:?}",
             new_rtt,
             self.rtt,
@@ -126,7 +167,7 @@ impl RttEstimator {
             self.max_seq_sent = Some(seq);
             if self.timestamp.is_none() {
                 self.timestamp = Some((timestamp, seq));
-                net_trace!("rtte: sampling at seq={:?}", seq);
+                tcp_trace!("rtte: sampling at seq={:?}", seq);
             }
         }
     }
@@ -142,7 +183,7 @@ impl RttEstimator {
 
     fn on_retransmit(&mut self) {
         if self.timestamp.is_some() {
-            net_trace!("rtte: abort sampling due to retransmit");
+            tcp_trace!("rtte: abort sampling due to retransmit");
         }
         self.timestamp = None;
         self.rto_count = self.rto_count.saturating_add(1);
@@ -156,7 +197,7 @@ impl RttEstimator {
             self.rto_count = 0;
             self.rtt = RTTE_MAX_RTO.min(self.rtt * 2);
             let rto = self.retransmission_timeout().total_millis();
-            net_trace!(
+            tcp_trace!(
                 "rtte: too many retransmissions, increasing: rtt={:?} dev={:?} rto={:?}",
                 self.rtt,
                 self.deviation,
@@ -263,7 +304,7 @@ impl Timer {
             Timer::Idle { .. } | Timer::FastRetransmit { .. } => {
                 *self = Timer::Retransmit {
                     expires_at: timestamp + delay,
-                    delay: delay,
+                    delay,
                 }
             }
             Timer::Retransmit { expires_at, delay } if timestamp >= expires_at => {
@@ -302,6 +343,19 @@ enum AckDelayTimer {
     Immediate,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+struct Tuple {
+    local: IpEndpoint,
+    remote: IpEndpoint,
+}
+
+impl Display for Tuple {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.local, self.remote)
+    }
+}
+
 /// A Transmission Control Protocol socket.
 ///
 /// A TCP socket may passively listen for connections or actively connect to another endpoint.
@@ -325,17 +379,9 @@ pub struct OhuaTcpSocket<'a> {
     hop_limit: Option<u8>,
     /// Address passed to listen(). Listen address is set when listen() is called and
     /// used every time the socket is reset back to the LISTEN state.
-    listen_address: IpAddress,
-    /// Current local endpoint. This is used for both filtering the incoming packets and
-    /// setting the source address. When listening or initiating connection on/from
-    /// an unspecified address, this field is updated with the chosen source address before
-    /// any packets are sent.
-    local_endpoint: IpEndpoint,
-    /// Current remote endpoint. This is used for both filtering the incoming packets and
-    /// setting the destination address. If the remote endpoint is unspecified, it means that
-    /// aborting the connection will not send an RST, and, in TIME-WAIT state, will not
-    /// send an ACK.
-    remote_endpoint: IpEndpoint,
+    listen_endpoint: IpListenEndpoint,
+    /// Current 4-tuple (local and remote endpoints).
+    tuple: Option<Tuple>,
     /// The sequence number corresponding to the beginning of the transmit buffer.
     /// I.e. an ACK(local_seq_no+n) packet removes n bytes from the transmit buffer.
     local_seq_no: TcpSeqNumber,
@@ -364,11 +410,11 @@ pub struct OhuaTcpSocket<'a> {
     remote_mss: usize,
     /// The timestamp of the last packet received.
     remote_last_ts: Option<Instant>,
-    /// The sequence number of the last packet recived, used for sACK
+    /// The sequence number of the last packet received, used for sACK
     local_rx_last_seq: Option<TcpSeqNumber>,
-    /// The ACK number of the last packet recived.
+    /// The ACK number of the last packet received.
     local_rx_last_ack: Option<TcpSeqNumber>,
-    /// The number of packets recived directly after
+    /// The number of packets received directly after
     /// each other which have the same ACK number.
     local_rx_dup_acks: u8,
 
@@ -416,15 +462,14 @@ impl<'a> OhuaTcpSocket<'a> {
             timer: Timer::new(),
             rtte: RttEstimator::default(),
             assembler: Assembler::new(rx_buffer.capacity()),
-            tx_buffer: tx_buffer,
-            rx_buffer: rx_buffer,
+            tx_buffer,
+            rx_buffer,
             rx_fin_received: false,
             timeout: None,
             keep_alive: None,
             hop_limit: None,
-            listen_address: IpAddress::default(),
-            local_endpoint: IpEndpoint::default(),
-            remote_endpoint: IpEndpoint::default(),
+            listen_endpoint: IpListenEndpoint::default(),
+            tuple: None,
             local_seq_no: TcpSeqNumber::default(),
             remote_seq_no: TcpSeqNumber::default(),
             remote_last_seq: TcpSeqNumber::default(),
@@ -503,8 +548,8 @@ impl<'a> OhuaTcpSocket<'a> {
     /// Return whether Nagle's Algorithm is enabled.
     ///
     /// See also the [set_nagle_enabled](#method.set_nagle_enabled) method.
-    pub fn nagle_enabled(&self) -> Option<Duration> {
-        self.ack_delay
+    pub fn nagle_enabled(&self) -> bool {
+        self.nagle
     }
 
     /// Return the current window field value, including scaling according to RFC 1323.
@@ -612,16 +657,16 @@ impl<'a> OhuaTcpSocket<'a> {
         self.hop_limit = hop_limit
     }
 
-    /// Return the local endpoint.
+    /// Return the local endpoint, or None if not connected.
     #[inline]
-    pub fn local_endpoint(&self) -> IpEndpoint {
-        self.local_endpoint
+    pub fn local_endpoint(&self) -> Option<IpEndpoint> {
+        Some(self.tuple?.local)
     }
 
-    /// Return the remote endpoint.
+    /// Return the remote endpoint, or None if not connected.
     #[inline]
-    pub fn remote_endpoint(&self) -> IpEndpoint {
-        self.remote_endpoint
+    pub fn remote_endpoint(&self) -> Option<IpEndpoint> {
+        Some(self.tuple?.remote)
     }
 
     /// Return the connection state, in terms of the TCP state machine.
@@ -641,12 +686,8 @@ impl<'a> OhuaTcpSocket<'a> {
         self.tx_buffer.clear();
         self.rx_buffer.clear();
         self.rx_fin_received = false;
-        self.keep_alive = None;
-        self.timeout = None;
-        self.hop_limit = None;
-        self.listen_address = IpAddress::default();
-        self.local_endpoint = IpEndpoint::default();
-        self.remote_endpoint = IpEndpoint::default();
+        self.listen_endpoint = IpListenEndpoint::default();
+        self.tuple = None;
         self.local_seq_no = TcpSeqNumber::default();
         self.remote_seq_no = TcpSeqNumber::default();
         self.remote_last_seq = TcpSeqNumber::default();
@@ -657,11 +698,8 @@ impl<'a> OhuaTcpSocket<'a> {
         self.remote_win_shift = rx_cap_log2.saturating_sub(16) as u8;
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
-        self.ack_delay = Some(ACK_DELAY_DEFAULT);
         self.ack_delay_timer = AckDelayTimer::Idle;
         self.challenge_ack_timer = Instant::from_secs(0);
-
-        self.nagle = true;
 
         #[cfg(feature = "async")]
         {
@@ -675,23 +713,22 @@ impl<'a> OhuaTcpSocket<'a> {
     /// This function returns `Err(Error::Illegal)` if the socket was already open
     /// (see [is_open](#method.is_open)), and `Err(Error::Unaddressable)`
     /// if the port in the given endpoint is zero.
-    pub fn listen<T>(&mut self, local_endpoint: T) -> Result<()>
+    pub fn listen<T>(&mut self, local_endpoint: T) -> Result<(), ListenError>
     where
-        T: Into<IpEndpoint>,
+        T: Into<IpListenEndpoint>,
     {
         let local_endpoint = local_endpoint.into();
         if local_endpoint.port == 0 {
-            return Err(Error::Unaddressable);
+            return Err(ListenError::Unaddressable);
         }
 
         if self.is_open() {
-            return Err(Error::Illegal);
+            return Err(ListenError::InvalidState);
         }
 
         self.reset();
-        self.listen_address = local_endpoint.addr;
-        self.local_endpoint = local_endpoint;
-        self.remote_endpoint = IpEndpoint::default();
+        self.listen_endpoint = local_endpoint;
+        self.tuple = None;
         self.set_state(State::Listen);
         Ok(())
     }
@@ -715,39 +752,49 @@ impl<'a> OhuaTcpSocket<'a> {
         cx: &mut OContext,
         remote_endpoint: T,
         local_endpoint: U,
-    ) -> Result<()>
+    ) -> Result<(), ConnectError>
     where
         T: Into<IpEndpoint>,
-        U: Into<IpEndpoint>,
+        U: Into<IpListenEndpoint>,
     {
-        let remote_endpoint = remote_endpoint.into();
-        let local_endpoint = local_endpoint.into();
+        let remote_endpoint: IpEndpoint = remote_endpoint.into();
+        let local_endpoint: IpListenEndpoint = local_endpoint.into();
 
         if self.is_open() {
-            return Err(Error::Illegal);
+            return Err(ConnectError::InvalidState);
         }
-        if !remote_endpoint.is_specified() {
-            return Err(Error::Unaddressable);
+        if remote_endpoint.port == 0 || remote_endpoint.addr.is_unspecified() {
+            return Err(ConnectError::Unaddressable);
         }
         if local_endpoint.port == 0 {
-            return Err(Error::Unaddressable);
+            return Err(ConnectError::Unaddressable);
         }
 
-        // If local address is not provided, use an unspecified address but a specified protocol.
-        // This lets us lower IpRepr later to determine IP header size and calculate MSS,
-        // but without committing to a specific address right away.
-        let local_addr = match local_endpoint.addr {
-            IpAddress::Unspecified => remote_endpoint.addr.as_unspecified(),
-            ip => ip,
-        };
+        // If local address is not provided, choose it automatically.
         let local_endpoint = IpEndpoint {
-            addr: local_addr,
-            ..local_endpoint
+            addr: match local_endpoint.addr {
+                Some(addr) => {
+                    if addr.is_unspecified() {
+                        return Err(ConnectError::Unaddressable);
+                    }
+                    addr
+                }
+                None => cx
+                    .get_source_address(remote_endpoint.addr)
+                    .ok_or(ConnectError::Unaddressable)?,
+            },
+            port: local_endpoint.port,
         };
 
+        if local_endpoint.addr.version() != remote_endpoint.addr.version() {
+            return Err(ConnectError::Unaddressable);
+        }
+
         self.reset();
-        self.local_endpoint = local_endpoint;
-        self.remote_endpoint = remote_endpoint;
+        self.tuple = Some(Tuple {
+            local: local_endpoint,
+            remote: remote_endpoint,
+        });
         self.set_state(State::SynSent);
 
         let seq = Self::random_seq_no(cx);
@@ -930,12 +977,12 @@ impl<'a> OhuaTcpSocket<'a> {
         !self.rx_buffer.is_empty()
     }
 
-    fn send_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
+    fn send_impl<'b, F, R>(&'b mut self, f: F) -> Result<R, SendError>
     where
         F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R),
     {
         if !self.may_send() {
-            return Err(Error::Illegal);
+            return Err(SendError::InvalidState);
         }
 
         // The connection might have been idle for a long time, and so remote_last_ts
@@ -949,10 +996,8 @@ impl<'a> OhuaTcpSocket<'a> {
         let (size, result) = f(&mut self.tx_buffer);
         if size > 0 {
             #[cfg(any(test, feature = "verbose"))]
-            net_trace!(
-                "tcp:{}:{}: tx buffer: enqueueing {} octets (now {})",
-                self.local_endpoint,
-                self.remote_endpoint,
+            tcp_trace!(
+                "tx buffer: enqueueing {} octets (now {})",
                 size,
                 _old_length + size
             );
@@ -965,7 +1010,7 @@ impl<'a> OhuaTcpSocket<'a> {
     ///
     /// This function returns `Err(Error::Illegal)` if the transmit half of
     /// the connection is not open; see [may_send](#method.may_send).
-    pub fn send<'b, F, R>(&'b mut self, f: F) -> Result<R>
+    pub fn send<'b, F, R>(&'b mut self, f: F) -> Result<R, SendError>
     where
         F: FnOnce(&'b mut [u8]) -> (usize, R),
     {
@@ -978,28 +1023,28 @@ impl<'a> OhuaTcpSocket<'a> {
     /// by the amount of free space in the transmit buffer; down to zero.
     ///
     /// See also [send](#method.send).
-    pub fn send_slice(&mut self, data: &[u8]) -> Result<usize> {
+    pub fn send_slice(&mut self, data: &[u8]) -> Result<usize, SendError> {
         self.send_impl(|tx_buffer| {
             let size = tx_buffer.enqueue_slice(data);
             (size, size)
         })
     }
 
-    fn recv_error_check(&mut self) -> Result<()> {
+    fn recv_error_check(&mut self) -> Result<(), RecvError> {
         // We may have received some data inside the initial SYN, but until the connection
         // is fully open we must not dequeue any data, as it may be overwritten by e.g.
         // another (stale) SYN. (We do not support TCP Fast Open.)
         if !self.may_recv() {
             if self.rx_fin_received {
-                return Err(Error::Finished);
+                return Err(RecvError::Finished);
             }
-            return Err(Error::Illegal);
+            return Err(RecvError::InvalidState);
         }
 
         Ok(())
     }
 
-    fn recv_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
+    fn recv_impl<'b, F, R>(&'b mut self, f: F) -> Result<R, RecvError>
     where
         F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R),
     {
@@ -1010,10 +1055,8 @@ impl<'a> OhuaTcpSocket<'a> {
         self.remote_seq_no += size;
         if size > 0 {
             #[cfg(any(test, feature = "verbose"))]
-            net_trace!(
-                "tcp:{}:{}: rx buffer: dequeueing {} octets (now {})",
-                self.local_endpoint,
-                self.remote_endpoint,
+            tcp_trace!(
+                "rx buffer: dequeueing {} octets (now {})",
                 size,
                 _old_length - size
             );
@@ -1031,7 +1074,7 @@ impl<'a> OhuaTcpSocket<'a> {
     ///
     /// In all other cases, `Err(Error::Illegal)` is returned and previously received data (if any)
     /// may be incomplete (truncated).
-    pub fn recv<'b, F, R>(&'b mut self, f: F) -> Result<R>
+    pub fn recv<'b, F, R>(&'b mut self, f: F) -> Result<R, RecvError>
     where
         F: FnOnce(&'b mut [u8]) -> (usize, R),
     {
@@ -1044,7 +1087,7 @@ impl<'a> OhuaTcpSocket<'a> {
     /// by the amount of occupied space in the receive buffer; down to zero.
     ///
     /// See also [recv](#method.recv).
-    pub fn recv_slice(&mut self, data: &mut [u8]) -> Result<usize> {
+    pub fn recv_slice(&mut self, data: &mut [u8]) -> Result<usize, RecvError> {
         self.recv_impl(|rx_buffer| {
             let size = rx_buffer.dequeue_slice(data);
             (size, size)
@@ -1055,18 +1098,13 @@ impl<'a> OhuaTcpSocket<'a> {
     /// the receive buffer, and return a pointer to it.
     ///
     /// This function otherwise behaves identically to [recv](#method.recv).
-    pub fn peek(&mut self, size: usize) -> Result<&[u8]> {
+    pub fn peek(&mut self, size: usize) -> Result<&[u8], RecvError> {
         self.recv_error_check()?;
 
         let buffer = self.rx_buffer.get_allocated(0, size);
         if !buffer.is_empty() {
             #[cfg(any(test, feature = "verbose"))]
-            net_trace!(
-                "tcp:{}:{}: rx buffer: peeking at {} octets",
-                self.local_endpoint,
-                self.remote_endpoint,
-                buffer.len()
-            );
+            tcp_trace!("rx buffer: peeking at {} octets", buffer.len());
         }
         Ok(buffer)
     }
@@ -1075,7 +1113,7 @@ impl<'a> OhuaTcpSocket<'a> {
     /// the receive buffer, and fill a slice from it.
     ///
     /// This function otherwise behaves identically to [recv_slice](#method.recv_slice).
-    pub fn peek_slice(&mut self, data: &mut [u8]) -> Result<usize> {
+    pub fn peek_slice(&mut self, data: &mut [u8]) -> Result<usize, RecvError> {
         let buffer = self.peek(data.len())?;
         let data = &mut data[..buffer.len()];
         data.copy_from_slice(buffer);
@@ -1100,22 +1138,7 @@ impl<'a> OhuaTcpSocket<'a> {
 
     fn set_state(&mut self, state: State) {
         if self.state != state {
-            if self.remote_endpoint.addr.is_unspecified() {
-                net_trace!(
-                    "tcp:{}: state={}=>{}",
-                    self.local_endpoint,
-                    self.state,
-                    state
-                );
-            } else {
-                net_trace!(
-                    "tcp:{}:{}: state={}=>{}",
-                    self.local_endpoint,
-                    self.remote_endpoint,
-                    self.state,
-                    state
-                );
-            }
+            tcp_trace!("state={}=>{}", self.state, state);
         }
 
         self.state = state;
@@ -1144,13 +1167,13 @@ impl<'a> OhuaTcpSocket<'a> {
             sack_ranges: [None, None, None],
             payload: &[],
         };
-        let ip_reply_repr = IpRepr::Unspecified {
-            src_addr: ip_repr.dst_addr(),
-            dst_addr: ip_repr.src_addr(),
-            protocol: IpProtocol::Tcp,
-            payload_len: reply_repr.buffer_len(),
-            hop_limit: 64,
-        };
+        let ip_reply_repr = IpRepr::new(
+            ip_repr.dst_addr(),
+            ip_repr.src_addr(),
+            IpProtocol::Tcp,
+            reply_repr.buffer_len(),
+            64,
+        );
         (ip_reply_repr, reply_repr)
     }
 
@@ -1211,7 +1234,7 @@ impl<'a> OhuaTcpSocket<'a> {
                 // number has advanced, or there was no previous sACK.
                 //
                 // While the RFC says we SHOULD keep a list of reported sACK ranges, and iterate
-                // through those, that is currently infeasable. Instead, we offer the range with
+                // through those, that is currently infeasible. Instead, we offer the range with
                 // the lowest sequence number (if one exists) to hint at what segments would
                 // most quickly advance the acknowledgement number.
                 reply_repr.sack_ranges[0] = self
@@ -1255,27 +1278,20 @@ impl<'a> OhuaTcpSocket<'a> {
             return false;
         }
 
-        // Reject packets with a wrong destination.
-        if self.local_endpoint.port != repr.dst_port {
-            return false;
+        if let Some(tuple) = &self.tuple {
+            // Reject packets not matching the 4-tuple
+            ip_repr.dst_addr() == tuple.local.addr
+                && repr.dst_port == tuple.local.port
+                && ip_repr.src_addr() == tuple.remote.addr
+                && repr.src_port == tuple.remote.port
+        } else {
+            // We're listening, reject packets not matching the listen endpoint.
+            let addr_ok = match self.listen_endpoint.addr {
+                Some(addr) => ip_repr.dst_addr() == addr,
+                None => true,
+            };
+            addr_ok && repr.dst_port != 0 && repr.dst_port == self.listen_endpoint.port
         }
-        if !self.local_endpoint.addr.is_unspecified()
-            && self.local_endpoint.addr != ip_repr.dst_addr()
-        {
-            return false;
-        }
-
-        // Reject packets from a source to which we aren't connected.
-        if self.remote_endpoint.port != 0 && self.remote_endpoint.port != repr.src_port {
-            return false;
-        }
-        if !self.remote_endpoint.addr.is_unspecified()
-            && self.remote_endpoint.addr != ip_repr.src_addr()
-        {
-            return false;
-        }
-
-        true
     }
 
     pub(crate) fn process(
@@ -1283,7 +1299,7 @@ impl<'a> OhuaTcpSocket<'a> {
         cx: &mut OContext,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
-    ) -> Result<Option<(IpRepr, TcpRepr<'static>)>> {
+    ) -> Option<(IpRepr, TcpRepr<'static>)> {
         debug_assert!(self.accepts(cx, ip_repr, repr));
 
         // Consider how much the sequence number space differs from the transmit buffer space.
@@ -1292,7 +1308,7 @@ impl<'a> OhuaTcpSocket<'a> {
             State::SynSent | State::SynReceived => (true, false),
             // In FIN-WAIT-1, LAST-ACK, or CLOSING, we've just sent a FIN.
             State::FinWait1 | State::LastAck | State::Closing => (false, true),
-            // In all other states we've already got acknowledgemetns for
+            // In all other states we've already got acknowledgements for
             // all of the control flags we sent.
             _ => (false, false),
         };
@@ -1303,22 +1319,13 @@ impl<'a> OhuaTcpSocket<'a> {
             // An RST received in response to initial SYN is acceptable if it acknowledges
             // the initial SYN.
             (State::SynSent, TcpControl::Rst, None) => {
-                net_debug!(
-                    "tcp:{}:{}: unacceptable RST (expecting RST|ACK) \
-                            in response to initial SYN",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                );
-                return Err(Error::Dropped);
+                net_debug!("unacceptable RST (expecting RST|ACK) in response to initial SYN");
+                return None;
             }
             (State::SynSent, TcpControl::Rst, Some(ack_number)) => {
                 if ack_number != self.local_seq_no + 1 {
-                    net_debug!(
-                        "tcp:{}:{}: unacceptable RST|ACK in response to initial SYN",
-                        self.local_endpoint,
-                        self.remote_endpoint
-                    );
-                    return Err(Error::Dropped);
+                    net_debug!("unacceptable RST|ACK in response to initial SYN");
+                    return None;
                 }
             }
             // Any other RST need only have a valid sequence number.
@@ -1329,22 +1336,14 @@ impl<'a> OhuaTcpSocket<'a> {
             (State::Listen, _, Some(_)) => unreachable!(),
             // Every packet after the initial SYN must be an acknowledgement.
             (_, _, None) => {
-                net_debug!(
-                    "tcp:{}:{}: expecting an ACK",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                );
-                return Err(Error::Dropped);
+                net_debug!("expecting an ACK");
+                return None;
             }
             // SYN|ACK in the SYN-SENT state must have the exact ACK number.
             (State::SynSent, TcpControl::Syn, Some(ack_number)) => {
                 if ack_number != self.local_seq_no + 1 {
-                    net_debug!(
-                        "tcp:{}:{}: unacceptable SYN|ACK in response to initial SYN",
-                        self.local_endpoint,
-                        self.remote_endpoint
-                    );
-                    return Ok(Some(Self::rst_reply(ip_repr, repr)));
+                    net_debug!("unacceptable SYN|ACK in response to initial SYN");
+                    return Some(Self::rst_reply(ip_repr, repr));
                 }
             }
             // ACKs in the SYN-SENT state are invalid.
@@ -1355,38 +1354,26 @@ impl<'a> OhuaTcpSocket<'a> {
                 // does it, we do too.
                 if ack_number == self.local_seq_no + 1 {
                     net_debug!(
-                        "tcp:{}:{}: expecting a SYN|ACK, received an ACK with the right ack_number, ignoring.",
-                                                self.local_endpoint,
-                        self.remote_endpoint
+                        "expecting a SYN|ACK, received an ACK with the right ack_number, ignoring."
                     );
-                    return Err(Error::Dropped);
+                    return None;
                 }
 
                 net_debug!(
-                    "tcp:{}:{}: expecting a SYN|ACK, received an ACK with the wrong ack_number, sending RST.",
-                                        self.local_endpoint,
-                    self.remote_endpoint
+                    "expecting a SYN|ACK, received an ACK with the wrong ack_number, sending RST."
                 );
-                return Ok(Some(Self::rst_reply(ip_repr, repr)));
+                return Some(Self::rst_reply(ip_repr, repr));
             }
             // Anything else in the SYN-SENT state is invalid.
             (State::SynSent, _, _) => {
-                net_debug!(
-                    "tcp:{}:{}: expecting a SYN|ACK",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                );
-                return Err(Error::Dropped);
+                net_debug!("expecting a SYN|ACK");
+                return None;
             }
             // ACK in the SYN-RECEIVED state must have the exact ACK number, or we RST it.
             (State::SynReceived, _, Some(ack_number)) => {
                 if ack_number != self.local_seq_no + 1 {
-                    net_debug!(
-                        "tcp:{}:{}: unacceptable ACK in response to SYN|ACK",
-                        self.local_endpoint,
-                        self.remote_endpoint
-                    );
-                    return Ok(Some(Self::rst_reply(ip_repr, repr)));
+                    net_debug!("unacceptable ACK in response to SYN|ACK");
+                    return Some(Self::rst_reply(ip_repr, repr));
                 }
             }
             // Every acknowledgement must be for transmitted but unacknowledged data.
@@ -1404,26 +1391,22 @@ impl<'a> OhuaTcpSocket<'a> {
 
                 if ack_number < ack_min {
                     net_debug!(
-                        "tcp:{}:{}: duplicate ACK ({} not in {}...{})",
-                        self.local_endpoint,
-                        self.remote_endpoint,
+                        "duplicate ACK ({} not in {}...{})",
                         ack_number,
                         ack_min,
                         ack_max
                     );
-                    return Err(Error::Dropped);
+                    return None;
                 }
 
                 if ack_number > ack_max {
                     net_debug!(
-                        "tcp:{}:{}: unacceptable ACK ({} not in {}...{})",
-                        self.local_endpoint,
-                        self.remote_endpoint,
+                        "unacceptable ACK ({} not in {}...{})",
                         ack_number,
                         ack_min,
                         ack_max
                     );
-                    return Ok(self.challenge_ack_reply(cx, ip_repr, repr));
+                    return self.challenge_ack_reply(cx, ip_repr, repr);
                 }
             }
         }
@@ -1443,30 +1426,19 @@ impl<'a> OhuaTcpSocket<'a> {
 
                 if window_start == window_end && segment_start != segment_end {
                     net_debug!(
-                        "tcp:{}:{}: non-zero-length segment with zero receive window, \
-                                will only send an ACK",
-                        self.local_endpoint,
-                        self.remote_endpoint
+                        "non-zero-length segment with zero receive window, will only send an ACK"
                     );
                     segment_in_window = false;
                 }
 
                 if segment_start == segment_end && segment_end == window_start - 1 {
-                    net_debug!(
-                        "tcp:{}:{}: received a keep-alive or window probe packet, \
-                                will send an ACK",
-                        self.local_endpoint,
-                        self.remote_endpoint
-                    );
+                    net_debug!("received a keep-alive or window probe packet, will send an ACK");
                     segment_in_window = false;
                 } else if !((window_start <= segment_start && segment_start <= window_end)
                     && (window_start <= segment_end && segment_end <= window_end))
                 {
                     net_debug!(
-                        "tcp:{}:{}: segment not in receive window \
-                                ({}..{} not intersecting {}..{}), will send challenge ACK",
-                        self.local_endpoint,
-                        self.remote_endpoint,
+                        "segment not in receive window ({}..{} not intersecting {}..{}), will send challenge ACK",
                         segment_start,
                         segment_end,
                         window_start,
@@ -1486,7 +1458,7 @@ impl<'a> OhuaTcpSocket<'a> {
                         self.timer.set_for_close(cx.now());
                     }
 
-                    return Ok(self.challenge_ack_reply(cx, ip_repr, repr));
+                    return self.challenge_ack_reply(cx, ip_repr, repr);
                 }
             }
         }
@@ -1495,10 +1467,11 @@ impl<'a> OhuaTcpSocket<'a> {
         // from the sequence space.
         let mut ack_len = 0;
         let mut ack_of_fin = false;
+        let mut ack_all = false;
         if repr.control != TcpControl::Rst {
             if let Some(ack_number) = repr.ack_number {
                 // Sequence number corresponding to the first byte in `tx_buffer`.
-                // This normally equals `local_seq_no`, but is 1 higher if we ahve sent a SYN,
+                // This normally equals `local_seq_no`, but is 1 higher if we have sent a SYN,
                 // as the SYN occupies 1 sequence number "before" the data.
                 let tx_buffer_start_seq = self.local_seq_no + (sent_syn as usize);
 
@@ -1509,13 +1482,11 @@ impl<'a> OhuaTcpSocket<'a> {
                     // space if all of that data is acknowledged.
                     if sent_fin && self.tx_buffer.len() + 1 == ack_len {
                         ack_len -= 1;
-                        net_trace!(
-                            "tcp:{}:{}: received ACK of FIN",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
+                        tcp_trace!("received ACK of FIN");
                         ack_of_fin = true;
                     }
+
+                    ack_all = self.remote_last_seq == ack_number
                 }
 
                 self.rtte.on_ack(cx.now(), ack_number);
@@ -1535,51 +1506,39 @@ impl<'a> OhuaTcpSocket<'a> {
         // Validate and update the state.
         match (self.state, control) {
             // RSTs are not accepted in the LISTEN state.
-            (State::Listen, TcpControl::Rst) => return Err(Error::Dropped),
+            (State::Listen, TcpControl::Rst) => return None,
 
             // RSTs in SYN-RECEIVED flip the socket back to the LISTEN state.
             (State::SynReceived, TcpControl::Rst) => {
-                net_trace!(
-                    "tcp:{}:{}: received RST",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                );
-                self.local_endpoint.addr = self.listen_address;
-                self.remote_endpoint = IpEndpoint::default();
+                tcp_trace!("received RST");
+                self.tuple = None;
                 self.set_state(State::Listen);
-                return Ok(None);
+                return None;
             }
 
             // RSTs in any other state close the socket.
             (_, TcpControl::Rst) => {
-                net_trace!(
-                    "tcp:{}:{}: received RST",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                );
+                tcp_trace!("received RST");
                 self.set_state(State::Closed);
-                self.local_endpoint = IpEndpoint::default();
-                self.remote_endpoint = IpEndpoint::default();
-                return Ok(None);
+                self.tuple = None;
+                return None;
             }
 
             // SYN packets in the LISTEN state change it to SYN-RECEIVED.
             (State::Listen, TcpControl::Syn) => {
-                net_trace!("tcp:{}: received SYN", self.local_endpoint);
+                tcp_trace!("received SYN");
                 if let Some(max_seg_size) = repr.max_seg_size {
                     if max_seg_size == 0 {
-                        net_trace!(
-                            "tcp:{}:{}: received SYNACK with zero MSS, ignoring",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
-                        return Ok(None);
+                        tcp_trace!("received SYNACK with zero MSS, ignoring");
+                        return None;
                     }
                     self.remote_mss = max_seg_size as usize
                 }
 
-                self.local_endpoint = IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port);
-                self.remote_endpoint = IpEndpoint::new(ip_repr.src_addr(), repr.src_port);
+                self.tuple = Some(Tuple {
+                    local: IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port),
+                    remote: IpEndpoint::new(ip_repr.src_addr(), repr.src_port),
+                });
                 self.local_seq_no = Self::random_seq_no(cx);
                 self.remote_seq_no = repr.seq_number + 1;
                 self.remote_last_seq = self.local_seq_no;
@@ -1611,24 +1570,15 @@ impl<'a> OhuaTcpSocket<'a> {
 
             // SYN|ACK packets in the SYN-SENT state change it to ESTABLISHED.
             (State::SynSent, TcpControl::Syn) => {
-                net_trace!(
-                    "tcp:{}:{}: received SYN|ACK",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                );
+                tcp_trace!("received SYN|ACK");
                 if let Some(max_seg_size) = repr.max_seg_size {
                     if max_seg_size == 0 {
-                        net_trace!(
-                            "tcp:{}:{}: received SYNACK with zero MSS, ignoring",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
-                        return Ok(None);
+                        tcp_trace!("received SYNACK with zero MSS, ignoring");
+                        return None;
                     }
                     self.remote_mss = max_seg_size as usize;
                 }
 
-                self.local_endpoint = IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port);
                 self.remote_seq_no = repr.seq_number + 1;
                 self.remote_last_seq = self.local_seq_no + 1;
                 self.remote_last_ack = Some(repr.seq_number);
@@ -1645,7 +1595,7 @@ impl<'a> OhuaTcpSocket<'a> {
             // ACK packets in ESTABLISHED state reset the retransmit timer,
             // except for duplicate ACK packets which preserve it.
             (State::Established, TcpControl::None) => {
-                if !self.timer.is_retransmit() || ack_len != 0 {
+                if !self.timer.is_retransmit() || ack_all {
                     self.timer.set_for_idle(cx.now(), self.keep_alive);
                 }
             }
@@ -1664,7 +1614,9 @@ impl<'a> OhuaTcpSocket<'a> {
                 if ack_of_fin {
                     self.set_state(State::FinWait2);
                 }
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                if ack_all {
+                    self.timer.set_for_idle(cx.now(), self.keep_alive);
+                }
             }
 
             // FIN packets in FIN-WAIT-1 state change it to CLOSING, or to TIME-WAIT
@@ -1714,21 +1666,15 @@ impl<'a> OhuaTcpSocket<'a> {
                 if ack_of_fin {
                     // Clear the remote endpoint, or we'll send an RST there.
                     self.set_state(State::Closed);
-                    self.local_endpoint = IpEndpoint::default();
-                    self.remote_endpoint = IpEndpoint::default();
+                    self.tuple = None;
                 } else {
                     self.timer.set_for_idle(cx.now(), self.keep_alive);
                 }
             }
 
             _ => {
-                net_debug!(
-                    "tcp:{}:{}: unexpected packet {}",
-                    self.local_endpoint,
-                    self.remote_endpoint,
-                    repr
-                );
-                return Err(Error::Dropped);
+                net_debug!("unexpected packet {}", repr);
+                return None;
             }
         }
 
@@ -1746,10 +1692,8 @@ impl<'a> OhuaTcpSocket<'a> {
         if ack_len > 0 {
             // Dequeue acknowledged octets.
             debug_assert!(self.tx_buffer.len() >= ack_len);
-            net_trace!(
-                "tcp:{}:{}: tx buffer: dequeueing {} octets (now {})",
-                self.local_endpoint,
-                self.remote_endpoint,
+            tcp_trace!(
+                "tx buffer: dequeueing {} octets (now {})",
                 ack_len,
                 self.tx_buffer.len() - ack_len
             );
@@ -1766,11 +1710,11 @@ impl<'a> OhuaTcpSocket<'a> {
 
             // Detect and react to duplicate ACKs by:
             // 1. Check if duplicate ACK and change self.local_rx_dup_acks accordingly
-            // 2. If exactly 3 duplicate ACKs recived, set for fast retransmit
+            // 2. If exactly 3 duplicate ACKs received, set for fast retransmit
             // 3. Update the last received ACK (self.local_rx_last_ack)
             match self.local_rx_last_ack {
                 // Duplicate ACK if payload empty and ACK doesn't move send window ->
-                // Increment duplicate ACK count and set for retransmit if we just recived
+                // Increment duplicate ACK count and set for retransmit if we just received
                 // the third duplicate ACK
                 Some(ref last_rx_ack)
                     if repr.payload.is_empty()
@@ -1781,9 +1725,7 @@ impl<'a> OhuaTcpSocket<'a> {
                     self.local_rx_dup_acks = self.local_rx_dup_acks.saturating_add(1);
 
                     net_debug!(
-                        "tcp:{}:{}: received duplicate ACK for seq {} (duplicate nr {}{})",
-                        self.local_endpoint,
-                        self.remote_endpoint,
+                        "received duplicate ACK for seq {} (duplicate nr {}{})",
                         ack_number,
                         self.local_rx_dup_acks,
                         if self.local_rx_dup_acks == u8::max_value() {
@@ -1795,22 +1737,14 @@ impl<'a> OhuaTcpSocket<'a> {
 
                     if self.local_rx_dup_acks == 3 {
                         self.timer.set_for_fast_retransmit();
-                        net_debug!(
-                            "tcp:{}:{}: started fast retransmit",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
+                        net_debug!("started fast retransmit");
                     }
                 }
-                // No duplicate ACK -> Reset state and update last recived ACK
+                // No duplicate ACK -> Reset state and update last received ACK
                 _ => {
                     if self.local_rx_dup_acks > 0 {
                         self.local_rx_dup_acks = 0;
-                        net_debug!(
-                            "tcp:{}:{}: reset duplicate ACK count",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
+                        net_debug!("reset duplicate ACK count");
                     }
                     self.local_rx_last_ack = Some(ack_number);
                 }
@@ -1830,20 +1764,18 @@ impl<'a> OhuaTcpSocket<'a> {
 
         let payload_len = repr.payload.len();
         if payload_len == 0 {
-            return Ok(None);
+            return None;
         }
 
         let assembler_was_empty = self.assembler.is_empty();
 
         // Try adding payload octets to the assembler.
         match self.assembler.add(payload_offset, payload_len) {
-            Ok(()) => {
+            Ok(_) => {
                 debug_assert!(self.assembler.total_size() == self.rx_buffer.capacity());
                 // Place payload octets into the buffer.
-                net_trace!(
-                    "tcp:{}:{}: rx buffer: receiving {} octets at offset {}",
-                    self.local_endpoint,
-                    self.remote_endpoint,
+                tcp_trace!(
+                    "rx buffer: receiving {} octets at offset {}",
                     payload_len,
                     payload_offset
                 );
@@ -1854,23 +1786,19 @@ impl<'a> OhuaTcpSocket<'a> {
             }
             Err(_) => {
                 net_debug!(
-                    "tcp:{}:{}: assembler: too many holes to add {} octets at offset {}",
-                    self.local_endpoint,
-                    self.remote_endpoint,
+                    "assembler: too many holes to add {} octets at offset {}",
                     payload_len,
                     payload_offset
                 );
-                return Err(Error::Dropped);
+                return None;
             }
         }
 
         if let Some(contig_len) = self.assembler.remove_front() {
             debug_assert!(self.assembler.total_size() == self.rx_buffer.capacity());
             // Enqueue the contiguous data octets in front of the buffer.
-            net_trace!(
-                "tcp:{}:{}: rx buffer: enqueueing {} octets (now {})",
-                self.local_endpoint,
-                self.remote_endpoint,
+            tcp_trace!(
+                "rx buffer: enqueueing {} octets (now {})",
                 contig_len,
                 self.rx_buffer.len() + contig_len
             );
@@ -1883,12 +1811,7 @@ impl<'a> OhuaTcpSocket<'a> {
 
         if !self.assembler.is_empty() {
             // Print the ranges recorded in the assembler.
-            net_trace!(
-                "tcp:{}:{}: assembler: {}",
-                self.local_endpoint,
-                self.remote_endpoint,
-                self.assembler
-            );
+            tcp_trace!("assembler: {}", self.assembler);
         }
 
         // Handle delayed acks
@@ -1896,11 +1819,7 @@ impl<'a> OhuaTcpSocket<'a> {
             if self.ack_to_transmit() || self.window_to_update() {
                 self.ack_delay_timer = match self.ack_delay_timer {
                     AckDelayTimer::Idle => {
-                        net_trace!(
-                            "tcp:{}:{}: starting delayed ack timer",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
+                        tcp_trace!("starting delayed ack timer");
 
                         AckDelayTimer::Waiting(cx.now() + ack_delay)
                     }
@@ -1908,19 +1827,11 @@ impl<'a> OhuaTcpSocket<'a> {
                     // for at least every second segment".
                     // For now, we send an ACK every second received packet, full-sized or not.
                     AckDelayTimer::Waiting(_) => {
-                        net_trace!(
-                            "tcp:{}:{}: delayed ack timer already started, forcing expiry",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
+                        tcp_trace!("delayed ack timer already started, forcing expiry");
                         AckDelayTimer::Immediate
                     }
                     AckDelayTimer::Immediate => {
-                        net_trace!(
-                            "tcp:{}:{}: delayed ack timer already force-expired",
-                            self.local_endpoint,
-                            self.remote_endpoint
-                        );
+                        tcp_trace!("delayed ack timer already force-expired");
                         AckDelayTimer::Immediate
                     }
                 };
@@ -1934,14 +1845,10 @@ impl<'a> OhuaTcpSocket<'a> {
             // Note that we change the transmitter state here.
             // This is fine because smoltcp assumes that it can always transmit zero or one
             // packets for every packet it receives.
-            net_trace!(
-                "tcp:{}:{}: ACKing incoming segment",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
-            Ok(Some(self.ack_reply(ip_repr, repr)))
+            tcp_trace!("ACKing incoming segment");
+            Some(self.ack_reply(ip_repr, repr))
         } else {
-            Ok(None)
+            None
         }
     }
 
@@ -1952,13 +1859,12 @@ impl<'a> OhuaTcpSocket<'a> {
         }
     }
 
-    fn seq_to_transmit(&self, cx: &OContext) -> bool {
-        let ip_header_len = match self.local_endpoint.addr {
+    fn seq_to_transmit(&self, cx: &mut OContext) -> bool {
+        let ip_header_len = match self.tuple.unwrap().local.addr {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
             #[cfg(feature = "proto-ipv6")]
             IpAddress::Ipv6(_) => crate::wire::IPV6_HEADER_LEN,
-            IpAddress::Unspecified => unreachable!(),
         };
 
         // Max segment size we're able to send due to MTU limitations.
@@ -1999,7 +1905,12 @@ impl<'a> OhuaTcpSocket<'a> {
             _ => false,
         };
 
-        if self.nagle && data_in_flight && !can_send_full {
+        // If we're applying the Nagle algorithm we don't want to send more
+        // until one of:
+        // * There's no data in flight
+        // * We can send a full packet
+        // * We have all the data we'll ever send (we're closing send)
+        if self.nagle && data_in_flight && !can_send_full && !want_fin {
             can_send = false;
         }
 
@@ -2039,12 +1950,12 @@ impl<'a> OhuaTcpSocket<'a> {
         }
     }
 
-    pub(crate) fn dispatch<F>(&mut self, cx: &mut OContext, emit: F) -> Result<()>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut OContext, emit: F) -> Result<(), E>
     where
-        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<()>,
+        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<(), E>,
     {
-        if !self.remote_endpoint.is_specified() {
-            return Err(Error::Exhausted);
+        if self.tuple.is_none() {
+            return Ok(());
         }
 
         if self.remote_last_ts.is_none() {
@@ -2061,21 +1972,12 @@ impl<'a> OhuaTcpSocket<'a> {
         // Check if any state needs to be changed because of a timer.
         if self.timed_out(cx.now()) {
             // If a timeout expires, we should abort the connection.
-            net_debug!(
-                "tcp:{}:{}: timeout exceeded",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            net_debug!("timeout exceeded");
             self.set_state(State::Closed);
         } else if !self.seq_to_transmit(cx) {
             if let Some(retransmit_delta) = self.timer.should_retransmit(cx.now()) {
                 // If a retransmit timer expired, we should resend data starting at the last ACK.
-                net_debug!(
-                    "tcp:{}:{}: retransmitting at t+{}",
-                    self.local_endpoint,
-                    self.remote_endpoint,
-                    retransmit_delta
-                );
+                net_debug!("retransmitting at t+{}", retransmit_delta);
 
                 // Rewind "last sequence number sent", as if we never
                 // had sent them. This will cause all data in the queue
@@ -2097,71 +1999,46 @@ impl<'a> OhuaTcpSocket<'a> {
         // TODO: WTF.. There is exactly ONE case here, that actually does something. The others are only for logging it seems
         if self.seq_to_transmit(cx) {
             // If we have data to transmit and it fits into partner's window, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will send data or flags",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will send data or flags");
         } else if self.ack_to_transmit() && self.delayed_ack_expired(cx.now()) {
             // If we have data to acknowledge, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will acknowledge",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will acknowledge");
         } else if self.window_to_update() && self.delayed_ack_expired(cx.now()) {
             // If we have window length increase to advertise, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will update window",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will update window");
         } else if self.state == State::Closed {
             // If we need to abort the connection, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will abort connection",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will abort connection");
         } else if self.timer.should_keep_alive(cx.now()) {
             // If we need to transmit a keep-alive packet, do it.
-            net_trace!(
-                "tcp:{}:{}: keep-alive timer expired",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("keep-alive timer expired");
         } else if self.timer.should_close(cx.now()) {
             // If we have spent enough time in the TIME-WAIT state, close the socket.
-            net_trace!(
-                "tcp:{}:{}: TIME-WAIT timer expired",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("TIME-WAIT timer expired");
             self.reset();
-            return Err(Error::Exhausted);
+            return Ok(());
         } else {
-            return Err(Error::Exhausted);
+            return Ok(());
         }
 
-        net_debug!("local: {:?}", &self.local_endpoint.addr);
-        net_debug!("remote: {:?}", &self.remote_endpoint.addr);
+        // NOTE(unwrap): we check tuple is not None the first thing in this function.
+        let tuple = self.tuple.unwrap();
 
         // Construct the lowered IP representation.
         // We might need this to calculate the MSS, so do it early.
-        let mut ip_repr = IpRepr::Unspecified {
-            src_addr: self.local_endpoint.addr,
-            dst_addr: self.remote_endpoint.addr,
-            protocol: IpProtocol::Tcp,
-            hop_limit: self.hop_limit.unwrap_or(64),
-            payload_len: 0,
-        }
-        .lower(&[])?;
+        let mut ip_repr = IpRepr::new(
+            tuple.local.addr,
+            tuple.remote.addr,
+            IpProtocol::Tcp,
+            0,
+            self.hop_limit.unwrap_or(64),
+        );
 
         // Construct the basic TCP representation, an empty ACK packet.
         // We'll adjust this to be more specific as needed.
         let mut repr = TcpRepr {
-            src_port: self.local_endpoint.port,
-            dst_port: self.remote_endpoint.port,
+            src_port: tuple.local.port,
+            dst_port: tuple.remote.port,
             control: TcpControl::None,
             seq_number: self.remote_last_seq,
             ack_number: Some(self.remote_seq_no + self.rx_buffer.len()),
@@ -2181,7 +2058,7 @@ impl<'a> OhuaTcpSocket<'a> {
             }
 
             // We never transmit anything in the LISTEN state.
-            State::Listen => return Err(Error::Exhausted),
+            State::Listen => return Ok(()),
 
             // We transmit a SYN in the SYN-SENT state.
             // We transmit a SYN|ACK in the SYN-RECEIVED state.
@@ -2269,16 +2146,10 @@ impl<'a> OhuaTcpSocket<'a> {
 
         // Trace a summary of what will be sent.
         if is_keep_alive {
-            net_trace!(
-                "tcp:{}:{}: sending a keep-alive",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("sending a keep-alive");
         } else if !repr.payload.is_empty() {
-            net_trace!(
-                "tcp:{}:{}: tx buffer: sending {} octets at offset {}",
-                self.local_endpoint,
-                self.remote_endpoint,
+            tcp_trace!(
+                "tx buffer: sending {} octets at offset {}",
                 repr.payload.len(),
                 self.remote_last_seq - self.local_seq_no
             );
@@ -2293,12 +2164,7 @@ impl<'a> OhuaTcpSocket<'a> {
                 (TcpControl::None, Some(_)) => "ACK",
                 _ => "<unreachable>",
             };
-            net_trace!(
-                "tcp:{}:{}: sending {}",
-                self.local_endpoint,
-                self.remote_endpoint,
-                flags
-            );
+            tcp_trace!("sending {}", flags);
         }
 
         if repr.control == TcpControl::Syn {
@@ -2325,18 +2191,10 @@ impl<'a> OhuaTcpSocket<'a> {
         match self.ack_delay_timer {
             AckDelayTimer::Idle => {}
             AckDelayTimer::Waiting(_) => {
-                net_trace!(
-                    "tcp:{}:{}: stop delayed ack timer",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                )
+                tcp_trace!("stop delayed ack timer")
             }
             AckDelayTimer::Immediate => {
-                net_trace!(
-                    "tcp:{}:{}: stop delayed ack timer (was force-expired)",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                )
+                tcp_trace!("stop delayed ack timer (was force-expired)")
             }
         }
         self.ack_delay_timer = AckDelayTimer::Idle;
@@ -2366,20 +2224,20 @@ impl<'a> OhuaTcpSocket<'a> {
 
         if self.state == State::Closed {
             // When aborting a connection, forget about it after sending a single RST packet.
-            self.local_endpoint = IpEndpoint::default();
-            self.remote_endpoint = IpEndpoint::default();
+            self.tuple = None;
         }
 
         Ok(())
     }
 
     #[cfg(feature = "ohua")]
+
     pub(crate) fn dispatch_before(
-        &mut self, cx: &OContext
-    ) -> Result<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
-    {
-        if !self.remote_endpoint.is_specified() {
-            return Err(Error::Exhausted);
+        &mut self, cx: &mut OContext
+    ) -> Either<(),((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
+   {
+        if self.tuple.is_none() {
+            return Either::Left(());
         }
 
         if self.remote_last_ts.is_none() {
@@ -2396,21 +2254,12 @@ impl<'a> OhuaTcpSocket<'a> {
         // Check if any state needs to be changed because of a timer.
         if self.timed_out(cx.now()) {
             // If a timeout expires, we should abort the connection.
-            net_debug!(
-                "tcp:{}:{}: timeout exceeded",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            net_debug!("timeout exceeded");
             self.set_state(State::Closed);
         } else if !self.seq_to_transmit(cx) {
             if let Some(retransmit_delta) = self.timer.should_retransmit(cx.now()) {
                 // If a retransmit timer expired, we should resend data starting at the last ACK.
-                net_debug!(
-                    "tcp:{}:{}: retransmitting at t+{}",
-                    self.local_endpoint,
-                    self.remote_endpoint,
-                    retransmit_delta
-                );
+                net_debug!("retransmitting at t+{}", retransmit_delta);
 
                 // Rewind "last sequence number sent", as if we never
                 // had sent them. This will cause all data in the queue
@@ -2429,70 +2278,49 @@ impl<'a> OhuaTcpSocket<'a> {
         }
 
         // Decide whether we're sending a packet.
+        // TODO: WTF.. There is exactly ONE case here, that actually does something. The others are only for logging it seems
         if self.seq_to_transmit(cx) {
             // If we have data to transmit and it fits into partner's window, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will send data or flags",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will send data or flags");
         } else if self.ack_to_transmit() && self.delayed_ack_expired(cx.now()) {
             // If we have data to acknowledge, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will acknowledge",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will acknowledge");
         } else if self.window_to_update() && self.delayed_ack_expired(cx.now()) {
             // If we have window length increase to advertise, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will update window",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will update window");
         } else if self.state == State::Closed {
             // If we need to abort the connection, do it.
-            net_trace!(
-                "tcp:{}:{}: outgoing segment will abort connection",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("outgoing segment will abort connection");
         } else if self.timer.should_keep_alive(cx.now()) {
             // If we need to transmit a keep-alive packet, do it.
-            net_trace!(
-                "tcp:{}:{}: keep-alive timer expired",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("keep-alive timer expired");
         } else if self.timer.should_close(cx.now()) {
             // If we have spent enough time in the TIME-WAIT state, close the socket.
-            net_trace!(
-                "tcp:{}:{}: TIME-WAIT timer expired",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("TIME-WAIT timer expired");
             self.reset();
-            return Err(Error::Exhausted);
+            return Either::Left(());
         } else {
-            return Err(Error::Exhausted);
+            return Either::Left(());
         }
+
+        // NOTE(unwrap): we check tuple is not None the first thing in this function.
+        let tuple = self.tuple.unwrap();
 
         // Construct the lowered IP representation.
         // We might need this to calculate the MSS, so do it early.
-        let mut ip_repr = IpRepr::Unspecified {
-            src_addr: self.local_endpoint.addr,
-            dst_addr: self.remote_endpoint.addr,
-            protocol: IpProtocol::Tcp,
-            hop_limit: self.hop_limit.unwrap_or(64),
-            payload_len: 0,
-        }
-        .lower(&[])?;
+        let mut ip_repr = IpRepr::new(
+            tuple.local.addr,
+            tuple.remote.addr,
+            IpProtocol::Tcp,
+            0,
+            self.hop_limit.unwrap_or(64),
+        );
 
         // Construct the basic TCP representation, an empty ACK packet.
         // We'll adjust this to be more specific as needed.
         let mut repr = TcpRepr {
-            src_port: self.local_endpoint.port,
-            dst_port: self.remote_endpoint.port,
+            src_port: tuple.local.port,
+            dst_port: tuple.remote.port,
             control: TcpControl::None,
             seq_number: self.remote_last_seq,
             ack_number: Some(self.remote_seq_no + self.rx_buffer.len()),
@@ -2512,7 +2340,7 @@ impl<'a> OhuaTcpSocket<'a> {
             }
 
             // We never transmit anything in the LISTEN state.
-            State::Listen => return Err(Error::Exhausted),
+            State::Listen => return Either::Left(()),
 
             // We transmit a SYN in the SYN-SENT state.
             // We transmit a SYN|ACK in the SYN-RECEIVED state.
@@ -2600,16 +2428,10 @@ impl<'a> OhuaTcpSocket<'a> {
 
         // Trace a summary of what will be sent.
         if is_keep_alive {
-            net_trace!(
-                "tcp:{}:{}: sending a keep-alive",
-                self.local_endpoint,
-                self.remote_endpoint
-            );
+            tcp_trace!("sending a keep-alive");
         } else if !repr.payload.is_empty() {
-            net_trace!(
-                "tcp:{}:{}: tx buffer: sending {} octets at offset {}",
-                self.local_endpoint,
-                self.remote_endpoint,
+            tcp_trace!(
+                "tx buffer: sending {} octets at offset {}",
                 repr.payload.len(),
                 self.remote_last_seq - self.local_seq_no
             );
@@ -2624,12 +2446,7 @@ impl<'a> OhuaTcpSocket<'a> {
                 (TcpControl::None, Some(_)) => "ACK",
                 _ => "<unreachable>",
             };
-            net_trace!(
-                "tcp:{}:{}: sending {}",
-                self.local_endpoint,
-                self.remote_endpoint,
-                flags
-            );
+            tcp_trace!("sending {}", flags);
         }
 
         if repr.control == TcpControl::Syn {
@@ -2651,7 +2468,7 @@ impl<'a> OhuaTcpSocket<'a> {
         // and we can readily derive a TcpReprP.
         let ip_repr_c = ip_repr.clone();
         let tcp_repr = TcpReprP::from(repr);
-        Ok(
+        Either::Right(
             ((ip_repr, repr)
             ,(
                 tcp_repr,
@@ -2664,21 +2481,22 @@ impl<'a> OhuaTcpSocket<'a> {
 
     #[cfg(feature = "ohua")]
     #[allow(dead_code)] // the normal interface from the original code
-    pub(crate) fn dispatch_device<F>(
+    pub(crate) fn dispatch_device<F, E>(
         &mut self, cx: &mut OContext, (ip_repr,repr):(IpRepr,TcpRepr), emit: F
-    ) -> Result<()>
+    ) -> Result<(), E>
     where
-        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<()>,
+        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<(), E>,
     {
         emit(cx, (ip_repr, repr))
     }
 
+// ToDo 
     #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_after(
         &mut self,
-        cx: &OContext,
+        cx: &mut OContext,
         (repr, is_keep_alive): (TcpReprP, bool)
-    )
+    )//ToDo: Original Code returned Ok here. Why don't we?!
     {
         // We've sent something, whether useful data or a keep-alive packet, so rewind
         // the keep-alive timer.
@@ -2688,25 +2506,19 @@ impl<'a> OhuaTcpSocket<'a> {
         match self.ack_delay_timer {
             AckDelayTimer::Idle => {}
             AckDelayTimer::Waiting(_) => {
-                net_trace!(
-                    "tcp:{}:{}: stop delayed ack timer",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                )
+                tcp_trace!("stop delayed ack timer")
             }
             AckDelayTimer::Immediate => {
-                net_trace!(
-                    "tcp:{}:{}: stop delayed ack timer (was force-expired)",
-                    self.local_endpoint,
-                    self.remote_endpoint
-                )
+                tcp_trace!("stop delayed ack timer (was force-expired)")
             }
         }
         self.ack_delay_timer = AckDelayTimer::Idle;
 
+
         // Leave the rest of the state intact if sending a keep-alive packet, since those
         // carry a fake segment.
         if is_keep_alive {
+            // ToDo:: Original Code returned Ok here. Why don't we?!
             return;
         }
 
@@ -2729,15 +2541,16 @@ impl<'a> OhuaTcpSocket<'a> {
 
         if self.state == State::Closed {
             // When aborting a connection, forget about it after sending a single RST packet.
-            self.local_endpoint = IpEndpoint::default();
-            self.remote_endpoint = IpEndpoint::default();
+            self.tuple = None;
         }
+
+        // ToDo:: Original Code returned Ok here. Why don't we?!
     }
 
     #[allow(clippy::if_same_then_else)]
     pub(crate) fn poll_at(&self, cx: &mut OContext) -> PollAt {
         // The logic here mirrors the beginning of dispatch() closely.
-        if !self.remote_endpoint.is_specified() {
+        if self.tuple.is_none() {
             // No one to talk to, nothing to transmit.
             PollAt::Ingress
         } else if self.remote_last_ts.is_none() {
@@ -2776,22 +2589,23 @@ impl<'a> OhuaTcpSocket<'a> {
     }
 
     #[cfg(feature = "ohua")]
-    pub(crate) fn dispatch_c(&mut self, cx: &mut OContext, d: Call) -> Results {
+    pub(crate) fn dispatch_by_call<E>(&mut self, cx: &mut OContext, d: DispatchCall<E>) -> DispatchResult<E> {
         match d {
-            Call::Pre(emit) => 
-                Results::Pre(
+            DispatchCall::Pre(emit) =>
+                DispatchResult::Pre(
                     // monadic programming in Rust
                     // to me this is absolutely weird: monadic programming facilitates imperative
-                    // programming but Rust is already an imperative langauage!
+                    // programming but Rust is already an imperative language!
                     self.dispatch_before(cx)
+                        .right() // turns an : Either () (packages) to an Option(packages)
                         .and_then(|(reprs,c)|{
                             // and here is the according functor map
                             emit(cx, reprs).map(|x| (x,c))
                         })
                 ),
-            Call::Post(tcp_repr, is_keep_alive) => {
+            DispatchCall::Post(tcp_repr, is_keep_alive) => {
                 self.dispatch_after(cx, (tcp_repr, is_keep_alive));
-                Results::Post
+                DispatchResult::Post
             }
         }
     }
@@ -2817,14 +2631,14 @@ impl<'a> OhuaTcpSocket<'a> {
 // }
 
 #[cfg(feature = "ohua")]
-pub enum Results {
-    Pre(Result<(Vec<u8>, (TcpReprP,IpRepr, bool))>),
+pub enum DispatchResult<E> {
+    Pre(Result<(Vec<u8>, (TcpReprP,IpRepr, bool)), E>),
     Post
 }
 
 #[cfg(feature = "ohua")]
-pub enum Call {
-    Pre(fn(&mut OContext, (IpRepr, TcpRepr)) -> Result<Vec<u8>>),
+pub enum DispatchCall<E> {
+    Pre(fn(&mut OContext, (IpRepr, TcpRepr)) -> Result<Vec<u8>, E>),
     Post(TcpReprP, bool)
 }
 
@@ -2843,8 +2657,8 @@ impl<'a> fmt::Write for OhuaTcpSocket<'a> {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::wire::ip::test::{MOCK_IP_ADDR_1, MOCK_IP_ADDR_2, MOCK_IP_ADDR_3, MOCK_UNSPECIFIED};
-    use crate::wire::{IpAddress, IpCidr, IpRepr};
+    use crate::wire::IpRepr;
+    use crate::Error;
     use core::i32;
     use std::ops::{Deref, DerefMut};
     use std::vec::Vec;
@@ -2855,24 +2669,62 @@ pub(crate) mod test {
 
     const LOCAL_PORT: u16 = 80;
     const REMOTE_PORT: u16 = 49500;
+    const LISTEN_END: IpListenEndpoint = IpListenEndpoint {
+        addr: None,
+        port: LOCAL_PORT,
+    };
     const LOCAL_END: IpEndpoint = IpEndpoint {
-        addr: MOCK_IP_ADDR_1,
+        addr: LOCAL_ADDR.into_address(),
         port: LOCAL_PORT,
     };
     const REMOTE_END: IpEndpoint = IpEndpoint {
-        addr: MOCK_IP_ADDR_2,
+        addr: REMOTE_ADDR.into_address(),
         port: REMOTE_PORT,
+    };
+    const TUPLE: Tuple = Tuple {
+        local: LOCAL_END,
+        remote: REMOTE_END,
     };
     const LOCAL_SEQ: TcpSeqNumber = TcpSeqNumber(10000);
     const REMOTE_SEQ: TcpSeqNumber = TcpSeqNumber(-10001);
 
-    const SEND_IP_TEMPL: IpRepr = IpRepr::Unspecified {
-        src_addr: MOCK_IP_ADDR_1,
-        dst_addr: MOCK_IP_ADDR_2,
-        protocol: IpProtocol::Tcp,
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "proto-ipv4")] {
+            use crate::wire::Ipv4Address as IpvXAddress;
+            use crate::wire::Ipv4Repr as IpvXRepr;
+            use IpRepr::Ipv4 as IpReprIpvX;
+
+            const LOCAL_ADDR: IpvXAddress = IpvXAddress([192, 168, 1, 1]);
+            const REMOTE_ADDR: IpvXAddress = IpvXAddress([192, 168, 1, 2]);
+            const OTHER_ADDR: IpvXAddress = IpvXAddress([192, 168, 1, 3]);
+
+            const BASE_MSS: u16 = 1460;
+        } else {
+            use crate::wire::Ipv6Address as IpvXAddress;
+            use crate::wire::Ipv6Repr as IpvXRepr;
+            use IpRepr::Ipv6 as IpReprIpvX;
+
+            const LOCAL_ADDR: IpvXAddress = IpvXAddress([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]);
+            const REMOTE_ADDR: IpvXAddress = IpvXAddress([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+            ]);
+            const OTHER_ADDR: IpvXAddress = IpvXAddress([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3,
+            ]);
+
+            const BASE_MSS: u16 = 1440;
+        }
+    }
+
+    const SEND_IP_TEMPL: IpRepr = IpReprIpvX(IpvXRepr {
+        src_addr: LOCAL_ADDR,
+        dst_addr: REMOTE_ADDR,
+        next_header: IpProtocol::Tcp,
         payload_len: 20,
         hop_limit: 64,
-    };
+    });
     const SEND_TEMPL: TcpRepr<'static> = TcpRepr {
         src_port: REMOTE_PORT,
         dst_port: LOCAL_PORT,
@@ -2886,13 +2738,13 @@ pub(crate) mod test {
         sack_ranges: [None, None, None],
         payload: &[],
     };
-    const _RECV_IP_TEMPL: IpRepr = IpRepr::Unspecified {
-        src_addr: MOCK_IP_ADDR_1,
-        dst_addr: MOCK_IP_ADDR_2,
-        protocol: IpProtocol::Tcp,
+    const _RECV_IP_TEMPL: IpRepr = IpReprIpvX(IpvXRepr {
+        src_addr: LOCAL_ADDR,
+        dst_addr: REMOTE_ADDR,
+        next_header: IpProtocol::Tcp,
         payload_len: 20,
         hop_limit: 64,
-    };
+    });
     const RECV_TEMPL: TcpRepr<'static> = TcpRepr {
         src_port: LOCAL_PORT,
         dst_port: REMOTE_PORT,
@@ -2906,11 +2758,6 @@ pub(crate) mod test {
         sack_ranges: [None, None, None],
         payload: &[],
     };
-
-    #[cfg(feature = "proto-ipv6")]
-    const BASE_MSS: u16 = 1440;
-    #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
-    const BASE_MSS: u16 = 1460;
 
     // =========================================================================================//
     // Helper functions
@@ -2938,53 +2785,64 @@ pub(crate) mod test {
         socket: &mut TestSocket,
         timestamp: Instant,
         repr: &TcpRepr,
-    ) -> Result<Option<TcpRepr<'static>>> {
+    ) -> Option<TcpRepr<'static>> {
         socket.cx.set_now(timestamp);
 
-        let ip_repr = IpRepr::Unspecified {
-            src_addr: MOCK_IP_ADDR_2,
-            dst_addr: MOCK_IP_ADDR_1,
-            protocol: IpProtocol::Tcp,
+        let ip_repr = IpReprIpvX(IpvXRepr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
             payload_len: repr.buffer_len(),
             hop_limit: 64,
-        };
+        });
         net_trace!("send: {}", repr);
 
         assert!(socket.socket.accepts(&mut socket.cx, &ip_repr, repr));
 
         match socket.socket.process(&mut socket.cx, &ip_repr, repr) {
-            Ok(Some((_ip_repr, repr))) => {
+            Some((_ip_repr, repr)) => {
                 net_trace!("recv: {}", repr);
-                Ok(Some(repr))
+                Some(repr)
             }
-            Ok(None) => Ok(None),
-            Err(err) => Err(err),
+            None => None,
         }
     }
 
     fn recv<F>(socket: &mut TestSocket, timestamp: Instant, mut f: F)
     where
-        F: FnMut(Result<TcpRepr>),
+        F: FnMut(Result<TcpRepr, Error>),
     {
         socket.cx.set_now(timestamp);
 
+        let mut sent = 0;
         let result = socket
             .socket
             .dispatch(&mut socket.cx, |_, (ip_repr, tcp_repr)| {
-                let ip_repr = ip_repr.lower(&[IpCidr::new(LOCAL_END.addr, 24)]).unwrap();
-
-                assert_eq!(ip_repr.protocol(), IpProtocol::Tcp);
-                assert_eq!(ip_repr.src_addr(), MOCK_IP_ADDR_1);
-                assert_eq!(ip_repr.dst_addr(), MOCK_IP_ADDR_2);
+                assert_eq!(ip_repr.next_header(), IpProtocol::Tcp);
+                assert_eq!(ip_repr.src_addr(), LOCAL_ADDR.into());
+                assert_eq!(ip_repr.dst_addr(), REMOTE_ADDR.into());
                 assert_eq!(ip_repr.payload_len(), tcp_repr.buffer_len());
 
                 net_trace!("recv: {}", tcp_repr);
+                sent += 1;
                 Ok(f(Ok(tcp_repr)))
             });
         match result {
-            Ok(()) => (),
+            Ok(()) => assert_eq!(sent, 1, "Exactly one packet should be sent"),
             Err(e) => f(Err(e)),
         }
+    }
+
+    fn recv_nothing(socket: &mut TestSocket, timestamp: Instant) {
+        socket.cx.set_now(timestamp);
+
+        let result: Result<(), ()> = socket
+            .socket
+            .dispatch(&mut socket.cx, |_, (_ip_repr, _tcp_repr)| {
+                panic!("Should not send a packet")
+            });
+
+        assert_eq!(result, Ok(()))
     }
 
     macro_rules! send {
@@ -2993,7 +2851,7 @@ pub(crate) mod test {
         ($socket:ident, $repr:expr, $result:expr) =>
             (send!($socket, time 0, $repr, $result));
         ($socket:ident, time $time:expr, $repr:expr) =>
-            (send!($socket, time $time, $repr, Ok(None)));
+            (send!($socket, time $time, $repr, None));
         ($socket:ident, time $time:expr, $repr:expr, $result:expr) =>
             (assert_eq!(send(&mut $socket, Instant::from_millis($time), &$repr), $result));
     }
@@ -3001,7 +2859,7 @@ pub(crate) mod test {
     macro_rules! recv {
         ($socket:ident, [$( $repr:expr ),*]) => ({
             $( recv!($socket, Ok($repr)); )*
-            recv!($socket, Err(Error::Exhausted))
+            recv_nothing!($socket)
         });
         ($socket:ident, $result:expr) =>
             (recv!($socket, time 0, $result));
@@ -3018,13 +2876,16 @@ pub(crate) mod test {
             (recv(&mut $socket, Instant::from_millis($time), |repr| assert_eq!(repr, $result)));
     }
 
+    macro_rules! recv_nothing {
+        ($socket:ident) => (recv_nothing!($socket, time 0));
+        ($socket:ident, time $time:expr) => (recv_nothing(&mut $socket, Instant::from_millis($time)));
+    }
+
     macro_rules! sanity {
         ($socket1:expr, $socket2:expr) => {{
             let (s1, s2) = ($socket1, $socket2);
             assert_eq!(s1.state, s2.state, "state");
-            assert_eq!(s1.listen_address, s2.listen_address, "listen_address");
-            assert_eq!(s1.local_endpoint, s2.local_endpoint, "local_endpoint");
-            assert_eq!(s1.remote_endpoint, s2.remote_endpoint, "remote_endpoint");
+            assert_eq!(s1.tuple, s2.tuple, "tuple");
             assert_eq!(s1.local_seq_no, s2.local_seq_no, "local_seq_no");
             assert_eq!(s1.remote_seq_no, s2.remote_seq_no, "remote_seq_no");
             assert_eq!(s1.remote_last_seq, s2.remote_last_seq, "remote_last_seq");
@@ -3048,25 +2909,15 @@ pub(crate) mod test {
         TestSocket { socket, cx }
     }
 
-    fn socket_syn_received_with_buffer_sizes0(
-        tx_len: usize, 
-        rx_len: usize,
-        local: IpEndpoint,
-        remote: IpEndpoint) -> TestSocket {
+    fn socket_syn_received_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
         s.state = State::SynReceived;
-        s.local_endpoint = local;
-        s.remote_endpoint = remote;
+        s.tuple = Some(TUPLE);
         s.local_seq_no = LOCAL_SEQ;
         s.remote_seq_no = REMOTE_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ;
         s.remote_win_len = 256;
         s
-    }
-
-    fn socket_syn_received_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
-        socket_syn_received_with_buffer_sizes0(
-            tx_len, rx_len, LOCAL_END, REMOTE_END)
     }
 
     fn socket_syn_received() -> TestSocket {
@@ -3076,8 +2927,7 @@ pub(crate) mod test {
     fn socket_syn_sent_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
         s.state = State::SynSent;
-        s.local_endpoint = IpEndpoint::new(MOCK_UNSPECIFIED, LOCAL_PORT);
-        s.remote_endpoint = REMOTE_END;
+        s.tuple = Some(TUPLE);
         s.local_seq_no = LOCAL_SEQ;
         s.remote_last_seq = LOCAL_SEQ;
         s
@@ -3087,6 +2937,8 @@ pub(crate) mod test {
         socket_syn_sent_with_buffer_sizes(64, 64)
     }
 
+/*
+// ToDo: refactor usage of endpoint to tuple
     fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> TestSocket {
         let mut s = socket();
         s.state = State::SynSent;
@@ -3096,15 +2948,9 @@ pub(crate) mod test {
         s.remote_last_seq = LOCAL_SEQ;
         s
     }
-
-    pub(crate) fn socket_established_with_buffer_sizes0(
-        tx_len: usize, 
-        rx_len: usize,
-        local: IpEndpoint,
-        remote: IpEndpoint) -> TestSocket {
-        let mut s = 
-            socket_syn_received_with_buffer_sizes0(
-                tx_len, rx_len, local, remote);
+ */
+    fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+        let mut s = socket_syn_received_with_buffer_sizes(tx_len, rx_len);
         s.state = State::Established;
         s.local_seq_no = LOCAL_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ + 1;
@@ -3113,23 +2959,7 @@ pub(crate) mod test {
         s
     }
 
-    pub(crate) fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
-        socket_established_with_buffer_sizes0(
-            tx_len, rx_len, LOCAL_END, REMOTE_END)
-    }
-
-    pub(crate) fn socket_established_with_endpoints(
-        local: IpEndpoint, remote: IpEndpoint) -> TestSocket {
-        socket_established_with_buffer_sizes0(64, 64, local, remote)
-    }
-    /*
-    pub(crate) fn only_socket_established_with_endpoints(
-        local: IpEndpoint, remote: IpEndpoint) -> OhuaTcpSocket<'static> {
-        let TestSocket{socket, cx} = socket_established_with_buffer_sizes0(64, 64, local, remote);
-        socket
-    }*/
-
-    pub(crate) fn socket_established() -> TestSocket {
+    fn socket_established() -> TestSocket {
         socket_established_with_buffer_sizes(64, 64)
     }
 
@@ -3247,7 +3077,7 @@ pub(crate) mod test {
     fn socket_listen() -> TestSocket {
         let mut s = socket();
         s.state = State::Listen;
-        s.local_endpoint = IpEndpoint::new(IpAddress::default(), LOCAL_PORT);
+        s.listen_endpoint = LISTEN_END;
         s
     }
 
@@ -3319,7 +3149,7 @@ pub(crate) mod test {
         ] {
             let mut s = socket_with_buffer_sizes(64, *buffer_size);
             s.state = State::Listen;
-            s.local_endpoint = IpEndpoint::new(IpAddress::default(), LOCAL_PORT);
+            s.listen_endpoint = LISTEN_END;
             assert_eq!(s.remote_win_shift, *shift_amt);
             send!(
                 s,
@@ -3357,14 +3187,14 @@ pub(crate) mod test {
     #[test]
     fn test_listen_validation() {
         let mut s = socket();
-        assert_eq!(s.listen(0), Err(Error::Unaddressable));
+        assert_eq!(s.listen(0), Err(ListenError::Unaddressable));
     }
 
     #[test]
     fn test_listen_twice() {
         let mut s = socket();
         assert_eq!(s.listen(80), Ok(()));
-        assert_eq!(s.listen(80), Err(Error::Illegal));
+        assert_eq!(s.listen(80), Err(ListenError::InvalidState));
     }
 
     #[test]
@@ -3407,9 +3237,9 @@ pub(crate) mod test {
                 seq_number: REMOTE_SEQ,
                 ack_number: None,
                 ..SEND_TEMPL
-            },
-            Err(Error::Dropped)
+            }
         );
+        assert_eq!(s.state, State::Listen);
     }
 
     #[test]
@@ -3468,13 +3298,13 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ), // wrong
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 control: TcpControl::Rst,
                 seq_number: LOCAL_SEQ,
                 ack_number: None,
                 window_len: 0,
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.state, State::SynReceived);
     }
@@ -3499,13 +3329,13 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ + 2), // wrong
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 control: TcpControl::Rst,
                 seq_number: LOCAL_SEQ + 2,
                 ack_number: None,
                 window_len: 0,
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.state, State::SynReceived);
     }
@@ -3553,6 +3383,7 @@ pub(crate) mod test {
     #[test]
     fn test_syn_received_rst() {
         let mut s = socket_syn_received();
+        s.listen_endpoint = LISTEN_END;
         recv!(
             s,
             [TcpRepr {
@@ -3573,11 +3404,8 @@ pub(crate) mod test {
             }
         );
         assert_eq!(s.state, State::Listen);
-        assert_eq!(
-            s.local_endpoint,
-            IpEndpoint::new(IpAddress::Unspecified, LOCAL_END.port)
-        );
-        assert_eq!(s.remote_endpoint, IpEndpoint::default());
+        assert_eq!(s.listen_endpoint, LISTEN_END);
+        assert_eq!(s.tuple, None);
     }
 
     #[test]
@@ -3593,8 +3421,7 @@ pub(crate) mod test {
             }
         );
         assert_eq!(s.state(), State::SynReceived);
-        assert_eq!(s.local_endpoint(), LOCAL_END);
-        assert_eq!(s.remote_endpoint(), REMOTE_END);
+        assert_eq!(s.tuple, Some(TUPLE));
         recv!(
             s,
             [TcpRepr {
@@ -3634,8 +3461,7 @@ pub(crate) mod test {
                 }
             );
             assert_eq!(s.state(), State::SynReceived);
-            assert_eq!(s.local_endpoint(), LOCAL_END);
-            assert_eq!(s.remote_endpoint(), REMOTE_END);
+            assert_eq!(s.tuple, Some(TUPLE));
             recv!(
                 s,
                 [TcpRepr {
@@ -3676,29 +3502,23 @@ pub(crate) mod test {
         let mut s = socket();
         assert_eq!(
             s.socket
-                .connect(&mut s.cx, (IpAddress::Unspecified, 80), LOCAL_END),
-            Err(Error::Unaddressable)
+                .connect(&mut s.cx, REMOTE_END, (IpvXAddress::UNSPECIFIED, 0)),
+            Err(ConnectError::Unaddressable)
         );
         assert_eq!(
             s.socket
-                .connect(&mut s.cx, REMOTE_END, (MOCK_UNSPECIFIED, 0)),
-            Err(Error::Unaddressable)
+                .connect(&mut s.cx, REMOTE_END, (IpvXAddress::UNSPECIFIED, 1024)),
+            Err(ConnectError::Unaddressable)
         );
         assert_eq!(
             s.socket
-                .connect(&mut s.cx, (MOCK_UNSPECIFIED, 0), LOCAL_END),
-            Err(Error::Unaddressable)
-        );
-        assert_eq!(
-            s.socket
-                .connect(&mut s.cx, (IpAddress::Unspecified, 80), LOCAL_END),
-            Err(Error::Unaddressable)
+                .connect(&mut s.cx, (IpvXAddress::UNSPECIFIED, 0), LOCAL_END),
+            Err(ConnectError::Unaddressable)
         );
         s.socket
             .connect(&mut s.cx, REMOTE_END, LOCAL_END)
             .expect("Connect failed with valid parameters");
-        assert_eq!(s.local_endpoint(), LOCAL_END);
-        assert_eq!(s.remote_endpoint(), REMOTE_END);
+        assert_eq!(s.tuple, Some(TUPLE));
     }
 
     #[test]
@@ -3708,10 +3528,7 @@ pub(crate) mod test {
         s.socket
             .connect(&mut s.cx, REMOTE_END, LOCAL_END.port)
             .unwrap();
-        assert_eq!(
-            s.local_endpoint,
-            IpEndpoint::new(MOCK_UNSPECIFIED, LOCAL_END.port)
-        );
+        assert_eq!(s.tuple, Some(TUPLE));
         recv!(
             s,
             [TcpRepr {
@@ -3735,32 +3552,20 @@ pub(crate) mod test {
                 ..SEND_TEMPL
             }
         );
-        assert_eq!(s.local_endpoint, LOCAL_END);
+        assert_eq!(s.tuple, Some(TUPLE));
     }
 
     #[test]
     fn test_connect_unspecified_local() {
         let mut s = socket();
-        assert_eq!(
-            s.socket
-                .connect(&mut s.cx, REMOTE_END, (MOCK_UNSPECIFIED, 80)),
-            Ok(())
-        );
-        s.abort();
-        assert_eq!(
-            s.socket
-                .connect(&mut s.cx, REMOTE_END, (IpAddress::Unspecified, 80)),
-            Ok(())
-        );
-        s.abort();
+        assert_eq!(s.socket.connect(&mut s.cx, REMOTE_END, 80), Ok(()));
     }
 
     #[test]
     fn test_connect_specified_local() {
         let mut s = socket();
         assert_eq!(
-            s.socket
-                .connect(&mut s.cx, REMOTE_END, (MOCK_IP_ADDR_2, 80)),
+            s.socket.connect(&mut s.cx, REMOTE_END, (REMOTE_ADDR, 80)),
             Ok(())
         );
     }
@@ -3768,15 +3573,10 @@ pub(crate) mod test {
     #[test]
     fn test_connect_twice() {
         let mut s = socket();
+        assert_eq!(s.socket.connect(&mut s.cx, REMOTE_END, 80), Ok(()));
         assert_eq!(
-            s.socket
-                .connect(&mut s.cx, REMOTE_END, (IpAddress::Unspecified, 80)),
-            Ok(())
-        );
-        assert_eq!(
-            s.socket
-                .connect(&mut s.cx, REMOTE_END, (IpAddress::Unspecified, 80)),
-            Err(Error::Illegal)
+            s.socket.connect(&mut s.cx, REMOTE_END, 80),
+            Err(ConnectError::InvalidState)
         );
     }
 
@@ -3785,7 +3585,7 @@ pub(crate) mod test {
         let mut s = socket();
         s.local_seq_no = LOCAL_SEQ;
         s.socket.connect(&mut s.cx, REMOTE_END, LOCAL_END).unwrap();
-        sanity!(s, socket_syn_sent_with_local_ipendpoint(LOCAL_END));
+        sanity!(s, socket_syn_sent());
     }
 
     #[test]
@@ -3822,7 +3622,7 @@ pub(crate) mod test {
                 ..RECV_TEMPL
             }]
         );
-        recv!(s, time 1000, Err(Error::Exhausted));
+        recv_nothing!(s, time 1000);
         assert_eq!(s.state, State::Established);
         sanity!(s, socket_established());
     }
@@ -3852,13 +3652,13 @@ pub(crate) mod test {
                 window_scale: Some(0),
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 control: TcpControl::Rst,
                 seq_number: LOCAL_SEQ,
                 ack_number: None,
                 window_len: 0,
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.state, State::SynSent);
     }
@@ -3888,8 +3688,7 @@ pub(crate) mod test {
                 seq_number: REMOTE_SEQ,
                 ack_number: None,
                 ..SEND_TEMPL
-            },
-            Err(Error::Dropped)
+            }
         );
         assert_eq!(s.state, State::SynSent);
     }
@@ -3904,8 +3703,7 @@ pub(crate) mod test {
                 seq_number: REMOTE_SEQ,
                 ack_number: Some(TcpSeqNumber(1234)),
                 ..SEND_TEMPL
-            },
-            Err(Error::Dropped)
+            }
         );
         assert_eq!(s.state, State::SynSent);
     }
@@ -3932,8 +3730,7 @@ pub(crate) mod test {
                 seq_number: REMOTE_SEQ,
                 ack_number: Some(LOCAL_SEQ + 1), // Correct
                 ..SEND_TEMPL
-            },
-            Err(Error::Dropped)
+            }
         );
 
         // It should trigger no response and change no state
@@ -3964,13 +3761,13 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ), // WRONG
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 control: TcpControl::Rst,
                 seq_number: LOCAL_SEQ, // matching the ack_number of the unexpected ack
                 ack_number: None,
                 window_len: 0,
                 ..RECV_TEMPL
-            }))
+            })
         );
 
         // It should trigger a RST, and change no state
@@ -4000,13 +3797,13 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ + 123456), // WRONG
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 control: TcpControl::Rst,
                 seq_number: LOCAL_SEQ + 123456, // matching the ack_number of the unexpected ack
                 ack_number: None,
                 window_len: 0,
                 ..RECV_TEMPL
-            }))
+            })
         );
 
         // It should trigger a RST, and change no state
@@ -4234,7 +4031,7 @@ pub(crate) mod test {
                     payload: &segment,
                     ..SEND_TEMPL
                 },
-                Ok(Some(TcpRepr {
+                Some(TcpRepr {
                     seq_number: LOCAL_SEQ + 1,
                     ack_number: Some(REMOTE_SEQ + 1 + 5000),
                     window_len: 4000,
@@ -4247,7 +4044,7 @@ pub(crate) mod test {
                         None
                     ],
                     ..RECV_TEMPL
-                }))
+                })
             );
         }
     }
@@ -4466,8 +4263,7 @@ pub(crate) mod test {
                 seq_number: REMOTE_SEQ + 1,
                 ack_number: None,
                 ..SEND_TEMPL
-            },
-            Err(Error::Dropped)
+            }
         );
     }
 
@@ -4481,8 +4277,7 @@ pub(crate) mod test {
                 seq_number: REMOTE_SEQ + 1,
                 ack_number: Some(TcpSeqNumber(LOCAL_SEQ.0 - 1)),
                 ..SEND_TEMPL
-            },
-            Err(Error::Dropped)
+            }
         );
         assert_eq!(s.local_seq_no, LOCAL_SEQ + 1);
         // Data not yet transmitted.
@@ -4493,11 +4288,11 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ + 10),
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.local_seq_no, LOCAL_SEQ + 1);
     }
@@ -4513,11 +4308,11 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ + 1),
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.remote_seq_no, REMOTE_SEQ + 1);
 
@@ -4529,8 +4324,7 @@ pub(crate) mod test {
                 seq_number: REMOTE_SEQ + 1 + 256,
                 ack_number: Some(LOCAL_SEQ + 1),
                 ..SEND_TEMPL
-            },
-            Ok(None)
+            }
         );
 
         // If we wait a bit, we do get a new one.
@@ -4542,11 +4336,11 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ + 1),
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.remote_seq_no, REMOTE_SEQ + 1);
     }
@@ -4587,11 +4381,11 @@ pub(crate) mod test {
                 payload: &b"123456"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.state, State::Established);
         send!(
@@ -4602,12 +4396,12 @@ pub(crate) mod test {
                 payload: &b"abcdef"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 6 + 6),
                 window_len: 52,
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.state, State::Established);
     }
@@ -4702,11 +4496,11 @@ pub(crate) mod test {
                 ack_number: None,
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 ..RECV_TEMPL
-            }))
+            })
         );
 
         assert_eq!(s.state, State::Established);
@@ -4734,12 +4528,12 @@ pub(crate) mod test {
                 ack_number: None,
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 2), // this has changed
                 window_len: 63,
                 ..RECV_TEMPL
-            }))
+            })
         );
     }
 
@@ -4978,11 +4772,11 @@ pub(crate) mod test {
             seq_number: REMOTE_SEQ + 1,
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
-        }, Ok(Some(TcpRepr {
+        }, Some(TcpRepr {
             seq_number: LOCAL_SEQ + 1 + 1,
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
-        })));
+        }));
         assert_eq!(
             s.timer,
             Timer::Close {
@@ -5003,7 +4797,7 @@ pub(crate) mod test {
             }]
         );
         assert_eq!(s.state, State::TimeWait);
-        recv!(s, time 60_000, Err(Error::Exhausted));
+        recv_nothing!(s, time 60_000);
         assert_eq!(s.state, State::Closed);
     }
 
@@ -5120,8 +4914,7 @@ pub(crate) mod test {
     #[test]
     fn test_listen() {
         let mut s = socket();
-        s.listen(IpEndpoint::new(IpAddress::default(), LOCAL_PORT))
-            .unwrap();
+        s.listen(LISTEN_END).unwrap();
         assert_eq!(s.state, State::Listen);
     }
 
@@ -5138,8 +4931,7 @@ pub(crate) mod test {
             }
         );
         assert_eq!(s.state(), State::SynReceived);
-        assert_eq!(s.local_endpoint(), LOCAL_END);
-        assert_eq!(s.remote_endpoint(), REMOTE_END);
+        assert_eq!(s.tuple, Some(TUPLE));
         recv!(
             s,
             [TcpRepr {
@@ -5520,12 +5312,12 @@ pub(crate) mod test {
                 payload: &b"abcdef"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 6),
                 window_len: 58,
                 ..RECV_TEMPL
-            }))
+            })
         );
     }
 
@@ -5539,7 +5331,7 @@ pub(crate) mod test {
             payload:    &b"abcdef"[..],
             ..RECV_TEMPL
         }));
-        recv!(s, time 1050, Err(Error::Exhausted));
+        recv_nothing!(s, time 1050);
         recv!(s, time 2000, Ok(TcpRepr {
             seq_number: LOCAL_SEQ + 1,
             ack_number: Some(REMOTE_SEQ + 1),
@@ -5568,9 +5360,9 @@ pub(crate) mod test {
             payload:    &b"012345"[..],
             ..RECV_TEMPL
         }), exact);
-        recv!(s, time 0, Err(Error::Exhausted));
+        recv_nothing!(s, time 0);
 
-        recv!(s, time 50, Err(Error::Exhausted));
+        recv_nothing!(s, time 50);
 
         recv!(s, time 1000, Ok(TcpRepr {
             control:    TcpControl::None,
@@ -5586,7 +5378,86 @@ pub(crate) mod test {
             payload:    &b"012345"[..],
             ..RECV_TEMPL
         }), exact);
-        recv!(s, time 1550, Err(Error::Exhausted));
+        recv_nothing!(s, time 1550);
+    }
+
+    #[test]
+    fn test_data_retransmit_bursts_half_ack() {
+        let mut s = socket_established();
+        s.remote_mss = 6;
+        s.send_slice(b"abcdef012345").unwrap();
+
+        recv!(s, time 0, Ok(TcpRepr {
+            control:    TcpControl::None,
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"abcdef"[..],
+            ..RECV_TEMPL
+        }), exact);
+        recv!(s, time 0, Ok(TcpRepr {
+            control:    TcpControl::Psh,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"012345"[..],
+            ..RECV_TEMPL
+        }), exact);
+        // Acknowledge the first packet
+        send!(s, time 5, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 6),
+            window_len: 6,
+            ..SEND_TEMPL
+        });
+        // The second packet should be re-sent.
+        recv!(s, time 1500, Ok(TcpRepr {
+            control:    TcpControl::Psh,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"012345"[..],
+            ..RECV_TEMPL
+        }), exact);
+
+        recv_nothing!(s, time 1550);
+    }
+
+    #[test]
+    fn test_data_retransmit_bursts_half_ack_close() {
+        let mut s = socket_established();
+        s.remote_mss = 6;
+        s.send_slice(b"abcdef012345").unwrap();
+        s.close();
+
+        recv!(s, time 0, Ok(TcpRepr {
+            control:    TcpControl::None,
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"abcdef"[..],
+            ..RECV_TEMPL
+        }), exact);
+        recv!(s, time 0, Ok(TcpRepr {
+            control:    TcpControl::Fin,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"012345"[..],
+            ..RECV_TEMPL
+        }), exact);
+        // Acknowledge the first packet
+        send!(s, time 5, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1 + 6),
+            window_len: 6,
+            ..SEND_TEMPL
+        });
+        // The second packet should be re-sent.
+        recv!(s, time 1500, Ok(TcpRepr {
+            control:    TcpControl::Fin,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"012345"[..],
+            ..RECV_TEMPL
+        }), exact);
+
+        recv_nothing!(s, time 1550);
     }
 
     #[test]
@@ -5832,7 +5703,7 @@ pub(crate) mod test {
         });
 
         // Send a long string of text divided into several packets
-        // because of previously recieved "window_len"
+        // because of previously received "window_len"
         s.send_slice(b"xxxxxxyyyyyywwwwwwzzzzzz").unwrap();
         // This packet is lost
         recv!(s, time 1000, Ok(TcpRepr {
@@ -5914,7 +5785,7 @@ pub(crate) mod test {
             _ => false,
         });
 
-        // ACK all recived segments
+        // ACK all received segments
         send!(s, time 1120, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
             ack_number: Some(LOCAL_SEQ + 1 + (6 * 4)),
@@ -5934,7 +5805,7 @@ pub(crate) mod test {
             ..RECV_TEMPL
         }));
 
-        // Normal ACK of previously recieved segment
+        // Normal ACK of previously received segment
         send!(
             s,
             TcpRepr {
@@ -5988,7 +5859,7 @@ pub(crate) mod test {
 
         assert_eq!(
             s.local_rx_dup_acks, 0,
-            "duplicate ACK counter is not reset when reciving data"
+            "duplicate ACK counter is not reset when receiving data"
         );
     }
 
@@ -5997,7 +5868,7 @@ pub(crate) mod test {
         let mut s = socket_established();
         s.remote_mss = 6;
 
-        // Normal ACK of previously recived segment
+        // Normal ACK of previously received segment
         send!(s, time 0, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
             ack_number: Some(LOCAL_SEQ + 1),
@@ -6067,10 +5938,10 @@ pub(crate) mod test {
 
         assert_eq!(
             s.local_rx_dup_acks, 0,
-            "duplicate ACK counter is not reset when reciving ACK which updates send window"
+            "duplicate ACK counter is not reset when receiving ACK which updates send window"
         );
 
-        // ACK all recived segments
+        // ACK all received segments
         send!(s, time 1120, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
             ack_number: Some(LOCAL_SEQ + 1 + (6 * 4)),
@@ -6163,7 +6034,7 @@ pub(crate) mod test {
 
         // even though we're in "fast retransmit", we shouldn't
         // force-send anything because the remote's window is full.
-        recv!(s, Err(Error::Exhausted));
+        recv_nothing!(s);
     }
 
     // =========================================================================================//
@@ -6245,7 +6116,7 @@ pub(crate) mod test {
         assert_eq!(s.recv_slice(rx_buf), Ok(4));
 
         // check that we do NOT send a window update even if it has changed.
-        recv!(s, Err(Error::Exhausted));
+        recv_nothing!(s);
     }
 
     #[test]
@@ -6278,7 +6149,7 @@ pub(crate) mod test {
         assert_eq!(s.recv_slice(rx_buf), Ok(4));
 
         // check that we do NOT send a window update even if it has changed.
-        recv!(s, Err(Error::Exhausted));
+        recv_nothing!(s);
     }
 
     // =========================================================================================//
@@ -6362,12 +6233,12 @@ pub(crate) mod test {
                 payload: &b"123456"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 6),
                 window_len: 0,
                 ..RECV_TEMPL
-            }))
+            })
         );
     }
 
@@ -6394,7 +6265,7 @@ pub(crate) mod test {
                 ..RECV_TEMPL
             }]
         );
-        recv!(s, time 0, Err(Error::Exhausted));
+        recv_nothing!(s, time 0);
         s.recv(|buffer| {
             assert_eq!(&buffer[..3], b"abc");
             (3, ())
@@ -6406,7 +6277,7 @@ pub(crate) mod test {
             window_len: 3,
             ..RECV_TEMPL
         }));
-        recv!(s, time 0, Err(Error::Exhausted));
+        recv_nothing!(s, time 0);
         s.recv(|buffer| {
             assert_eq!(buffer, b"def");
             (buffer.len(), ())
@@ -6496,12 +6367,12 @@ pub(crate) mod test {
                 payload: &b"def"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 3),
                 window_len: 6,
                 ..RECV_TEMPL
-            }))
+            })
         );
         send!(
             s,
@@ -6511,12 +6382,12 @@ pub(crate) mod test {
                 payload: &b"abc"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 9),
                 window_len: 0,
                 ..RECV_TEMPL
-            }))
+            })
         );
         assert_eq!(s.remote_last_win, s.rx_buffer.window() as u16);
         s.recv(|buffer| (buffer.len(), ())).unwrap();
@@ -6570,7 +6441,7 @@ pub(crate) mod test {
     fn test_established_timeout() {
         let mut s = socket_established();
         s.set_timeout(Some(Duration::from_millis(1000)));
-        recv!(s, time 250, Err(Error::Exhausted));
+        recv_nothing!(s, time 250);
         assert_eq!(
             s.socket.poll_at(&mut s.cx),
             PollAt::Time(Instant::from_millis(1250))
@@ -6617,7 +6488,7 @@ pub(crate) mod test {
             payload:    &[0],
             ..RECV_TEMPL
         }));
-        recv!(s, time 100, Err(Error::Exhausted));
+        recv_nothing!(s, time 100);
         assert_eq!(
             s.socket.poll_at(&mut s.cx),
             PollAt::Time(Instant::from_millis(150))
@@ -6637,19 +6508,19 @@ pub(crate) mod test {
             payload:    &[0],
             ..RECV_TEMPL
         }));
-        recv!(s, time 155, Err(Error::Exhausted));
+        recv_nothing!(s, time 155);
         assert_eq!(
             s.socket.poll_at(&mut s.cx),
             PollAt::Time(Instant::from_millis(205))
         );
-        recv!(s, time 200, Err(Error::Exhausted));
+        recv_nothing!(s, time 200);
         recv!(s, time 205, Ok(TcpRepr {
             control:    TcpControl::Rst,
             seq_number: LOCAL_SEQ + 1,
             ack_number: Some(REMOTE_SEQ + 1),
             ..RECV_TEMPL
         }));
-        recv!(s, time 205, Err(Error::Exhausted));
+        recv_nothing!(s, time 205);
         assert_eq!(s.state, State::Closed);
     }
 
@@ -6721,11 +6592,11 @@ pub(crate) mod test {
                 ack_number: Some(LOCAL_SEQ + 1),
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 ..RECV_TEMPL
-            }))
+            })
         );
     }
 
@@ -6747,7 +6618,7 @@ pub(crate) mod test {
             s.socket.poll_at(&mut s.cx),
             PollAt::Time(Instant::from_millis(100))
         );
-        recv!(s, time 95, Err(Error::Exhausted));
+        recv_nothing!(s, time 95);
         recv!(s, time 100, Ok(TcpRepr {
             seq_number: LOCAL_SEQ,
             ack_number: Some(REMOTE_SEQ + 1),
@@ -6759,7 +6630,7 @@ pub(crate) mod test {
             s.socket.poll_at(&mut s.cx),
             PollAt::Time(Instant::from_millis(200))
         );
-        recv!(s, time 195, Err(Error::Exhausted));
+        recv_nothing!(s, time 195);
         recv!(s, time 200, Ok(TcpRepr {
             seq_number: LOCAL_SEQ,
             ack_number: Some(REMOTE_SEQ + 1),
@@ -6776,7 +6647,7 @@ pub(crate) mod test {
             s.socket.poll_at(&mut s.cx),
             PollAt::Time(Instant::from_millis(350))
         );
-        recv!(s, time 345, Err(Error::Exhausted));
+        recv_nothing!(s, time 345);
         recv!(s, time 350, Ok(TcpRepr {
             seq_number: LOCAL_SEQ,
             ack_number: Some(REMOTE_SEQ + 1),
@@ -6797,10 +6668,15 @@ pub(crate) mod test {
         assert_eq!(
             s.socket.dispatch(&mut s.cx, |_, (ip_repr, _)| {
                 assert_eq!(ip_repr.hop_limit(), 0x2a);
-                Ok(())
+                Ok::<_, Error>(())
             }),
             Ok(())
         );
+
+        // assert that user-configurable settings are kept,
+        // see https://github.com/smoltcp-rs/smoltcp/issues/601.
+        s.reset();
+        assert_eq!(s.hop_limit(), Some(0x2a));
     }
 
     #[test]
@@ -6825,11 +6701,11 @@ pub(crate) mod test {
                 payload: &b"def"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1),
                 ..RECV_TEMPL
-            }))
+            })
         );
         s.recv(|buffer| {
             assert_eq!(buffer, b"");
@@ -6844,12 +6720,12 @@ pub(crate) mod test {
                 payload: &b"abcdef"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 6),
                 window_len: 58,
                 ..RECV_TEMPL
-            }))
+            })
         );
         s.recv(|buffer| {
             assert_eq!(buffer, b"abcdef");
@@ -6945,7 +6821,7 @@ pub(crate) mod test {
             (3, ())
         })
         .unwrap();
-        assert_eq!(s.recv(|_| (0, ())), Err(Error::Finished));
+        assert_eq!(s.recv(|_| (0, ())), Err(RecvError::Finished));
     }
 
     #[test]
@@ -6967,7 +6843,7 @@ pub(crate) mod test {
             (3, ())
         })
         .unwrap();
-        assert_eq!(s.recv(|_| (0, ())), Err(Error::Finished));
+        assert_eq!(s.recv(|_| (0, ())), Err(RecvError::Finished));
     }
 
     #[test]
@@ -6989,7 +6865,7 @@ pub(crate) mod test {
             (3, ())
         })
         .unwrap();
-        assert_eq!(s.recv(|_| (0, ())), Err(Error::Finished));
+        assert_eq!(s.recv(|_| (0, ())), Err(RecvError::Finished));
     }
 
     #[test]
@@ -7013,12 +6889,12 @@ pub(crate) mod test {
                 payload: &b"ghi"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 3),
                 window_len: 61,
                 ..RECV_TEMPL
-            }))
+            })
         );
         s.recv(|data| {
             assert_eq!(data, b"abc");
@@ -7041,7 +6917,7 @@ pub(crate) mod test {
         );
         // Error must be `Illegal` even if we've received a FIN,
         // because we are missing data.
-        assert_eq!(s.recv(|_| (0, ())), Err(Error::Illegal));
+        assert_eq!(s.recv(|_| (0, ())), Err(RecvError::InvalidState));
     }
 
     #[test]
@@ -7070,7 +6946,7 @@ pub(crate) mod test {
             (3, ())
         })
         .unwrap();
-        assert_eq!(s.recv(|_| (0, ())), Err(Error::Illegal));
+        assert_eq!(s.recv(|_| (0, ())), Err(RecvError::InvalidState));
     }
 
     #[test]
@@ -7093,12 +6969,12 @@ pub(crate) mod test {
                 payload: &b"ghi"[..],
                 ..SEND_TEMPL
             },
-            Ok(Some(TcpRepr {
+            Some(TcpRepr {
                 seq_number: LOCAL_SEQ + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 3),
                 window_len: 61,
                 ..RECV_TEMPL
-            }))
+            })
         );
         send!(
             s,
@@ -7114,7 +6990,7 @@ pub(crate) mod test {
             (3, ())
         })
         .unwrap();
-        assert_eq!(s.recv(|_| (0, ())), Err(Error::Illegal));
+        assert_eq!(s.recv(|_| (0, ())), Err(RecvError::InvalidState));
     }
 
     // =========================================================================================//
@@ -7136,7 +7012,7 @@ pub(crate) mod test {
         );
 
         // No ACK is immediately sent.
-        recv!(s, Err(Error::Exhausted));
+        recv_nothing!(s);
 
         // After 10ms, it is sent.
         recv!(s, time 11, Ok(TcpRepr {
@@ -7169,7 +7045,7 @@ pub(crate) mod test {
         .unwrap();
 
         // However, no ACK or window update is immediately sent.
-        recv!(s, Err(Error::Exhausted));
+        recv_nothing!(s);
 
         // After 10ms, it is sent.
         recv!(s, time 11, Ok(TcpRepr {
@@ -7229,7 +7105,7 @@ pub(crate) mod test {
         );
 
         // No ACK is immediately sent.
-        recv!(s, Err(Error::Exhausted));
+        recv_nothing!(s);
 
         send!(
             s,
@@ -7268,7 +7144,7 @@ pub(crate) mod test {
         );
 
         // No ACK is immediately sent.
-        recv!(s, Err(Error::Exhausted));
+        recv_nothing!(s);
 
         send!(
             s,
@@ -7368,6 +7244,29 @@ pub(crate) mod test {
         );
     }
 
+    #[test]
+    fn test_final_packet_in_stream_doesnt_wait_for_nagle() {
+        let mut s = socket_established();
+        s.remote_mss = 6;
+        s.send_slice(b"abcdef0").unwrap();
+        s.socket.close();
+
+        recv!(s, time 0, Ok(TcpRepr {
+            control:    TcpControl::None,
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"abcdef"[..],
+            ..RECV_TEMPL
+        }), exact);
+        recv!(s, time 0, Ok(TcpRepr {
+            control:    TcpControl::Fin,
+            seq_number: LOCAL_SEQ + 1 + 6,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload:    &b"0"[..],
+            ..RECV_TEMPL
+        }), exact);
+    }
+
     // =========================================================================================//
     // Tests for packet filtering.
     // =========================================================================================//
@@ -7406,31 +7305,31 @@ pub(crate) mod test {
             ..SEND_TEMPL
         };
 
-        let ip_repr = IpRepr::Unspecified {
-            src_addr: MOCK_IP_ADDR_2,
-            dst_addr: MOCK_IP_ADDR_1,
-            protocol: IpProtocol::Tcp,
+        let ip_repr = IpReprIpvX(IpvXRepr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
             payload_len: tcp_repr.buffer_len(),
             hop_limit: 64,
-        };
+        });
         assert!(s.socket.accepts(&mut s.cx, &ip_repr, &tcp_repr));
 
-        let ip_repr_wrong_src = IpRepr::Unspecified {
-            src_addr: MOCK_IP_ADDR_3,
-            dst_addr: MOCK_IP_ADDR_1,
-            protocol: IpProtocol::Tcp,
+        let ip_repr_wrong_src = IpReprIpvX(IpvXRepr {
+            src_addr: OTHER_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
             payload_len: tcp_repr.buffer_len(),
             hop_limit: 64,
-        };
+        });
         assert!(!s.socket.accepts(&mut s.cx, &ip_repr_wrong_src, &tcp_repr));
 
-        let ip_repr_wrong_dst = IpRepr::Unspecified {
-            src_addr: MOCK_IP_ADDR_2,
-            dst_addr: MOCK_IP_ADDR_3,
-            protocol: IpProtocol::Tcp,
+        let ip_repr_wrong_dst = IpReprIpvX(IpvXRepr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: OTHER_ADDR,
+            next_header: IpProtocol::Tcp,
             payload_len: tcp_repr.buffer_len(),
             hop_limit: 64,
-        };
+        });
         assert!(!s.socket.accepts(&mut s.cx, &ip_repr_wrong_dst, &tcp_repr));
     }
 
