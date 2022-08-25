@@ -4,7 +4,7 @@ use crate::Result;
 use std::rc::Rc;
 use std::cell::RefCell;
 
-pub struct OhuaSocket{
+pub struct OhuaRawSocket{
   pub data : Rc<RefCell<Option<Vec<u8>>>>
 }
 
@@ -14,13 +14,13 @@ pub struct TxToken{
 }
 
 
-impl OhuaSocket {
+impl OhuaRawSocket {
     pub fn new() -> Self {
-        OhuaSocket{ data: Rc::new(RefCell::new(None)) }
+        OhuaRawSocket{ data: Rc::new(RefCell::new(None)) }
     }
 }
 
-impl<'a> Device<'a> for OhuaSocket {
+impl<'a> Device<'a> for OhuaRawSocket {
     type RxToken = RxToken;
     type TxToken = TxToken;
 

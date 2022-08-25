@@ -88,6 +88,43 @@ impl<'a> SocketSet<'a> {
         }
     }
 
+    //Reminder: Remove this method when we don't pass around sockets any more
+    pub fn readd_stolen_socket<T: AnySocket<'a>>(&mut self, socket: T, meta:Meta, handle:usize) -> SocketHandle {
+        let put = |index: usize, slot: &mut SocketStorage<'a>, socket: Socket<'a>| {
+            net_trace!("[{}]: adding", index);
+            let handle = SocketHandle(index);
+            let mut meta = meta;
+            meta.handle = handle;
+            *slot = SocketStorage {
+                inner: Some(Item { meta, socket }),
+            };
+            handle
+        };
+
+        let socket = socket.upcast();
+
+        for (index, slot) in self.sockets.iter_mut().enumerate() {
+            if index == handle && slot.inner.is_none() {
+                return put(index, slot, socket);
+            }
+        }
+
+        match self.sockets {
+            ManagedSlice::Borrowed(_) => panic!("adding a socket to a full SocketSet"),
+            #[cfg(any(feature = "std", feature = "alloc"))]
+            ManagedSlice::Owned(ref mut sockets) => {
+                sockets.push(SocketStorage { inner: None });
+                let index = sockets.len() - 1;
+                put(index, &mut sockets[index], socket)
+            }
+        }
+    }
+    //Reminder : Just like the function above, remove when possible
+    pub fn remove_item(&mut self, handle: usize) -> Option<Item<'a>> {
+        net_trace!("[{}]: removing item", handle);
+        self.sockets[handle].inner.take()
+   }
+
     /// Get a socket from the set by its handle, as mutable.
     ///
     /// # Panics
@@ -145,5 +182,9 @@ impl<'a> SocketSet<'a> {
     /// Iterate every socket in this set.
     pub(crate) fn items_mut(&mut self) -> impl Iterator<Item = &mut Item<'a>> + '_ {
         self.sockets.iter_mut().filter_map(|x| x.inner.as_mut())
+    }
+
+    pub(crate) fn size(& self) -> usize {
+        self.sockets.len()
     }
 }

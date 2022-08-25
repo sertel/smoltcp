@@ -1079,6 +1079,7 @@ impl<'a> Interface<'a> {
             }
 
             let mut neighbor_addr = None;
+
             let mut respond = |inner: &mut InterfaceInner, response: IpPacket| {
                 neighbor_addr = Some(response.ip_repr().dst_addr());
                 match device.transmit().ok_or(Error::Exhausted) {
@@ -1098,7 +1099,6 @@ impl<'a> Interface<'a> {
                         net_debug!("failed to transmit IP: {}", e);
                     }
                 }
-
                 Ok(())
             };
 
@@ -1136,6 +1136,7 @@ impl<'a> Interface<'a> {
                 Socket::Dns(ref mut socket) => socket.dispatch(inner, |inner, response| {
                     respond(inner, IpPacket::Udp(response))
                 }),
+                _ => panic!("Don't mix normal interface with Ohua sockets")
             };
 
             match result {
@@ -1163,6 +1164,99 @@ impl<'a> Interface<'a> {
         }
         emitted_any
     }
+/*
+    fn socket_egress_old(&mut self) -> Result<bool> {
+        let Self {
+            device,
+            inner,
+            sockets,
+            ..
+        } = self;
+        let _caps = device.capabilities();
+
+        let mut emitted_any = false;
+        for item in sockets.iter_mut() {
+            if !item
+                .meta
+                .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
+            {
+                continue;
+            }
+
+            let mut neighbor_addr = None;
+            let mut device_result = Ok(());
+
+            macro_rules! respond {
+                ($inner:expr, $response:expr) => {{
+                    let response = $response;
+                    neighbor_addr = Some(response.ip_repr().dst_addr());
+                    let tx_token = device.transmit().ok_or(Error::Exhausted)?;
+                    device_result = $inner.dispatch_ip(tx_token, response);
+                    device_result
+                }};
+            }
+
+            let socket_result = match &mut item.socket {
+                #[cfg(feature = "socket-raw")]
+                Socket::Raw(socket) => socket.dispatch(inner, |inner, response| {
+                    respond!(inner, IpPacket::Raw(response))
+                }),
+                #[cfg(feature = "socket-icmp")]
+                Socket::Icmp(socket) => socket.dispatch(inner, |inner, response| match response {
+                    #[cfg(feature = "proto-ipv4")]
+                    (IpRepr::Ipv4(ipv4_repr), IcmpRepr::Ipv4(icmpv4_repr)) => {
+                        respond!(inner, IpPacket::Icmpv4((ipv4_repr, icmpv4_repr)))
+                    }
+                    #[cfg(feature = "proto-ipv6")]
+                    (IpRepr::Ipv6(ipv6_repr), IcmpRepr::Ipv6(icmpv6_repr)) => {
+                        respond!(inner, IpPacket::Icmpv6((ipv6_repr, icmpv6_repr)))
+                    }
+                    _ => Err(Error::Unaddressable),
+                }),
+                #[cfg(feature = "socket-udp")]
+                Socket::Udp(socket) => socket.dispatch(inner, |inner, response| {
+                    respond!(inner, IpPacket::Udp(response))
+                }),
+                #[cfg(feature = "socket-tcp")]
+                Socket::Tcp(socket) => socket.dispatch(inner, |inner, response| {
+                    respond!(inner, IpPacket::Tcp(response))
+                }),
+                #[cfg(feature = "socket-dhcpv4")]
+                Socket::Dhcpv4(socket) => socket.dispatch(inner, |inner, response| {
+                    respond!(inner, IpPacket::Dhcpv4(response))
+                }),
+            };
+
+            match (device_result, socket_result) {
+                (Err(Error::Exhausted), _) => break,   // nowhere to transmit
+                (Ok(()), Err(Error::Exhausted)) => (), // nothing to transmit
+                (Err(Error::Unaddressable), _) => {
+                    // `NeighborCache` already takes care of rate limiting the neighbor discovery
+                    // requests from the socket. However, without an additional rate limiting
+                    // mechanism, we would spin on every socket that has yet to discover its
+                    // neighboor.
+                    item.meta.neighbor_missing(
+                        inner.now,
+                        neighbor_addr.expect("non-IP response packet"),
+                    );
+                    break;
+                }
+                (Err(err), _) | (_, Err(err)) => {
+                    net_debug!(
+                        "{}: cannot dispatch egress packet: {}",
+                        item.meta.handle,
+                        err
+                    );
+                    return Err(err);
+                }
+                (Ok(()), Ok(())) => emitted_any = true,
+            }
+        }
+        Ok(emitted_any)
+    }
+*/
+
+
 
     /// Depending on `igmp_report_state` and the therein contained
     /// timeouts, send IGMP membership reports.

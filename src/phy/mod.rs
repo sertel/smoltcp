@@ -106,7 +106,7 @@ mod pcap_writer;
 #[cfg(all(feature = "phy-raw_socket", unix))]
 mod raw_socket;
 #[cfg(feature = "ohua")]
-mod ohua_raw_socket;
+mod phy_ohua_raw_socket;
 mod tracer;
 #[cfg(all(
     feature = "phy-tuntap_interface",
@@ -128,7 +128,7 @@ pub use self::pcap_writer::{PcapLinkType, PcapMode, PcapSink, PcapWriter};
 #[cfg(all(feature = "phy-raw_socket", unix))]
 pub use self::raw_socket::RawSocket;
 #[cfg(feature = "ohua")]
-pub use self::ohua_raw_socket::OhuaSocket;
+pub use self::phy_ohua_raw_socket::OhuaRawSocket;
 pub use self::tracer::Tracer;
 #[cfg(all(
     feature = "phy-tuntap_interface",

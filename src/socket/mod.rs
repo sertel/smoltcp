@@ -37,7 +37,7 @@ pub mod raw_ohua;
 mod waker;
 
 #[cfg(feature="ohua")]
-pub use self::tcp::{Call, Results};
+pub use self::tcp_ohua::{DispatchCall, DispatchResult};
 
 
 #[cfg(feature = "async")]
@@ -82,7 +82,7 @@ pub enum Socket<'a> {
     #[cfg(feature = "ohua")]
     OhuaTcp(tcp_ohua::OhuaTcpSocket<'a>),
     #[cfg(feature = "ohua")]
-    OhuaRaw(raw_ohua::OhuaRawSocket<'a>),
+    OhuaRaw(raw_ohua::ORawSocket<'a>),
 }
 
 impl<'a> Socket<'a> {
@@ -108,6 +108,17 @@ impl<'a> Socket<'a> {
             Socket::Dhcpv4(s) => s.poll_at(cx),
             #[cfg(feature = "socket-dns")]
             Socket::Dns(s) => s.poll_at(cx),
+        }
+    }
+
+    pub(crate)  fn poll_at_ohua(&self, cx: &mut OContext) -> PollAt {
+        match self {
+            #[cfg(feature = "ohua")]
+            Socket::OhuaTcp(s) => s.poll_at(cx),
+            #[cfg(feature = "ohua")]
+            Socket::OhuaRaw(s) => s.poll_at(cx),
+            other_socket => panic!("The 'ohua' indicates 'poll_at_ohua'\
+                    is not intended to be used by normal sockets"),
         }
     }
 }

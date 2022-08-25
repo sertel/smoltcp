@@ -10,7 +10,7 @@ use super::fragmentation::PacketAssemblerSet;
 use super::socket_set::SocketSet;
 use crate::iface::Routes;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-use crate::iface::{NeighborAnswer, NeighborCache};
+use crate::iface::{NeighborAnswer, NeighborCache, Context};
 use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use crate::rand::Rand;
 #[cfg(feature = "socket-dhcpv4")]
@@ -28,7 +28,9 @@ use super::socket_meta::Meta;
 #[cfg(feature = "ohua")]
 use super::socket_set::Item;
 #[cfg(feature = "ohua")]
-use crate::phy::OhuaSocket;
+use crate::phy::OhuaRawSocket;
+
+use crate::iface::interface::{IpPacket};
 
 pub(crate) struct FragmentsBuffer<'a> {
     #[cfg(feature = "proto-ipv4-fragmentation")]
@@ -143,6 +145,8 @@ macro_rules! check {
 
 // We use these macros to temporarily take the 'field' i.e. the inner interface 
 // from its owner (the interface) during function execution and put it back afterwards
+
+
 macro_rules! let_field {
     ($self:ident.$field:ident, $($t:expr);+) => {
         match $self.$field.as_ref() {
@@ -199,7 +203,7 @@ macro_rules! assert_none {
 pub struct OInterface<'a> {
     inner: Option<OInterfaceInner<'a>>,
     fragments: FragmentsBuffer<'a>,
-    out_packets: Option<OutPackets<'a>>,
+    out_packets: OutPackets<'a>,
 }
 
 /// The device independent part of an Ethernet network interface.
@@ -574,7 +578,7 @@ let iface = builder.finalize(&mut device);
                 )))]
                 _lifetime: core::marker::PhantomData,
             },
-            out_packets: Some(OutPackets {
+            out_packets: OutPackets {
                 #[cfg(feature = "proto-sixlowpan-fragmentation")]
                 sixlowpan_out_packet: SixlowpanOutPacket::new(
                     self.sixlowpan_out_buffer
@@ -583,7 +587,7 @@ let iface = builder.finalize(&mut device);
 
                 #[cfg(not(feature = "proto-sixlowpan-fragmentation"))]
                 _lifetime: core::marker::PhantomData,
-            }),
+            },
             inner: Some(OInterfaceInner {
                 now: Instant::from_secs(0),
                 caps,
@@ -611,6 +615,7 @@ let iface = builder.finalize(&mut device);
     }
 }
 
+
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "medium-ethernet")]
@@ -619,7 +624,7 @@ enum EthernetPacket<'a> {
     Arp(ArpRepr),
     Ip(IpPacket<'a>),
 }
-
+/*
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum IpPacket<'a> {
@@ -731,6 +736,7 @@ impl<'a> IpPacket<'a> {
         }
     }
 }
+ */
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
 fn icmp_reply_payload_len(len: usize, mtu: usize, header_len: usize) -> usize {
@@ -766,28 +772,9 @@ impl<'a> OInterface<'a> {
     ///
     /// The context is needed for some socket methods.
     pub fn context(&mut self) -> &mut OInterfaceInner<'a> {
-        let_mut_field!(self.inner,
-           inner)
-    }
-    /// # Panics
-    /// This function may panic if the handle does not belong to this socket set
-    /// or the socket has the wrong type.
-    /*pub fn get_socket_and_context<T: AnySocket<'a>>(
-        &mut self,
-        handle: SocketHandle,
-    ) -> (&mut T, &mut OInterfaceInner<'a>) {
-        let_mut_field!(self.inner,
-            (self.sockets.get(handle), inner)
-        )
+        self.inner_mut()
     }
 
-    /// Remove a socket from the set, without changing its state.
-    ///
-    /// # Panics
-    /// This function may panic if the handle does not belong to this socket set.
-    pub fn remove_socket(&mut self, handle: SocketHandle) -> Socket<'a> {
-        self.sockets.remove(handle)
-    }*/
 
     /// Get the HardwareAddress address of the interface.
     ///
@@ -806,9 +793,7 @@ impl<'a> OInterface<'a> {
                 || self.inner.caps.medium == Medium::Ieee802154
         );
 
-        let_field!(self.inner,
-            inner.hardware_addr.unwrap()
-        )
+        self.inner().hardware_addr.unwrap()
     }
 
     /// Set the HardwareAddress address of the interface.
@@ -825,12 +810,12 @@ impl<'a> OInterface<'a> {
 
         #[cfg(all(feature = "medium-ieee802154", feature = "medium-ethernet"))]
         assert!(
-            self.inner.caps.medium == Medium::Ethernet
-                || self.inner.caps.medium == Medium::Ieee802154
+            self.inner().caps.medium == Medium::Ethernet
+                || self.inner().caps.medium == Medium::Ieee802154
         );
 
         OInterfaceInner::check_hardware_addr(&addr);
-        self.inner.hardware_addr = Some(addr);
+        self.inner_mut().hardware_addr = Some(addr);
     }
 
 /* ToDo: Remove after refactoring
@@ -968,11 +953,9 @@ impl<'a> OInterface<'a> {
     /// # Panics
     /// This function panics if any of the addresses are not unicast.
     pub fn update_ip_addrs<F: FnOnce(&mut ManagedSlice<'a, IpCidr>)>(&mut self, f: F) {
-        let_mut_field!(self.inner,
-            f(&mut inner.ip_addrs);
-            OInterfaceInner::flush_cache(inner);
-            OInterfaceInner::check_ip_addrs(&inner.ip_addrs)
-        )
+            f(&mut self.inner_mut().ip_addrs);
+            OInterfaceInner::flush_cache(self.inner_mut());
+            OInterfaceInner::check_ip_addrs(&self.inner().ip_addrs)
     }
 
     /// Check whether the interface has the given IP address assigned.
@@ -987,15 +970,11 @@ impl<'a> OInterface<'a> {
     }
 
     pub fn routes(&self) -> &Routes<'a> {
-        let_field!(self.inner,
-            &inner.routes
-        )
+        &self.inner().routes
     }
 
     pub fn routes_mut(&mut self) -> &mut Routes<'a> {
-        let_mut_field!(self.inner,
-            &mut inner.routes
-        )
+        &mut self.inner_mut().routes
     }
 
     /// Transmit packets queued in the given sockets, and receive packets queued
@@ -1024,9 +1003,7 @@ impl<'a> OInterface<'a> {
     where
         D: for<'d> Device<'d>,
     {
-        let_mut_field!(self.inner,
-            inner.now = timestamp
-        );
+        self.inner().now = timestamp;
 
         #[cfg(feature = "proto-ipv4-fragmentation")]
         if let Err(e) = self
@@ -1080,8 +1057,7 @@ impl<'a> OInterface<'a> {
     /// [poll]: #method.poll
     /// [Instant]: struct.Instant.html
     pub fn poll_at(&mut self, timestamp: Instant, sockets: &SocketSet<'_>) -> Option<Instant> {
-        let_mut_field!(self.inner,
-            inner.now = timestamp;
+       self.inner_mut().now = timestamp;
 	
 	// ToDo: If they ever leave the interface, outpackets need to be wrapped like inner
         #[cfg(feature = "proto-sixlowpan-fragmentation")]
@@ -1089,12 +1065,12 @@ impl<'a> OInterface<'a> {
             return Some(Instant::from_millis(0));
         }
 
-        // let inner = &mut self.inner;
+        let inner = self.inner_mut();
 
         sockets
             .items()
             .filter_map(move |item| {
-                let socket_poll_at = item.socket.poll_at(inner);
+                let socket_poll_at = item.socket.poll_at_ohua(inner);
                 match item
                     .meta
                     .poll_at(socket_poll_at, |ip_addr| inner.has_neighbor(&ip_addr))
@@ -1105,7 +1081,6 @@ impl<'a> OInterface<'a> {
                 }
             })
             .min()
-        )
     }
 
     /// Return an _advisory wait time_ for calling [poll] the next time.
@@ -1129,15 +1104,16 @@ impl<'a> OInterface<'a> {
         D: for<'d> Device<'d>,
     {
         let mut processed_any = false;
-//        let Self {
-//            inner,
-//            fragments: ref mut _fragments,
-//            out_packets: _out_packets,
-//        } = self;
-        
+        let Self {
+            // inner,
+            fragments: ref mut _fragments,
+            out_packets: _out_packets,
+            ..
+        } = self;
 
-        let_mut_field!(self.inner,
-                    while let Some((rx_token, tx_token)) = device.receive() {
+        let inner = self.inner_mut();
+
+        while let Some((rx_token, tx_token)) = device.receive() {
             let res = rx_token.consume(inner.now, |frame| {
                 match inner.caps.medium {
                     #[cfg(feature = "medium-ethernet")]
@@ -1176,9 +1152,7 @@ impl<'a> OInterface<'a> {
                 net_debug!("Failed to consume RX token: {}", err);
             }
         }
-
         processed_any
-        )
     }
 
     // ToDo: This is actually replaced by the socket_egress_tcp, remove when sure.
@@ -1186,17 +1160,16 @@ impl<'a> OInterface<'a> {
     where
         D: for<'d> Device<'d>,
     {
-//        let Self {
-//            inner,
-//            out_packets: _out_packets,
-//            ..
-//        } = self;
+        let Self {
+            //inner,
+            out_packets: _out_packets,
+            ..
+        } = self;
         let _caps = device.capabilities();
-	
+	    let inner = self.inner_mut();
         let mut emitted_any = false;
 
-        let_mut_field!(self.inner,
-            for item in sockets.iter_mut() {
+        for item in sockets.items_mut() {
                 if !item
                     .meta
                     .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
@@ -1207,7 +1180,7 @@ impl<'a> OInterface<'a> {
               let mut neighbor_addr = None;
                 
 
-              let mut respond = |inner: &mut InterfaceInner, response: IpPacket| {
+              let mut respond = |inner: &mut OInterfaceInner, response: IpPacket| {
                 neighbor_addr = Some(response.ip_repr().dst_addr());
                 match device.transmit().ok_or(Error::Exhausted) {
                     Ok(_t) => {
@@ -1231,43 +1204,46 @@ impl<'a> OInterface<'a> {
               };
 
               let result = match &mut item.socket {
+                #[cfg(feature = "ohua")]
+                Socket::OhuaTcp(socket) => socket.dispatch(inner, |inner, response| {
+                    respond(inner, IpPacket::Tcp(response))
+                }),
+                /*
                 #[cfg(feature = "socket-raw")]
-                Socket::Raw(socket) => socket.dispatch(inner, |inner, response| {
-                    respond(inner, IpPacket::Raw(response))
+                Socket::Raw(socket) => socket.dispatch(&mut inner.as_context(), |inner, response| {
+                    respond(inner.as_context(), IpPacket::Raw(response))
                 }),
                 #[cfg(feature = "socket-icmp")]
-                Socket::Icmp(socket) => socket.dispatch(inner, |inner, response| match response {
+                Socket::Icmp(socket) => socket.dispatch(&mut inner.as_context(), |inner, response| match response {
                     #[cfg(feature = "proto-ipv4")]
                     (IpRepr::Ipv4(ipv4_repr), IcmpRepr::Ipv4(icmpv4_repr)) => {
                         respond(inner, IpPacket::Icmpv4((ipv4_repr, icmpv4_repr)))
                     }
                     #[cfg(feature = "proto-ipv6")]
                     (IpRepr::Ipv6(ipv6_repr), IcmpRepr::Ipv6(icmpv6_repr)) => {
-                        respond(inner, IpPacket::Icmpv6((ipv6_repr, icmpv6_repr)))
+                        respond(inner.as_context(), IpPacket::Icmpv6((ipv6_repr, icmpv6_repr)))
                     }
                     #[allow(unreachable_patterns)]
                     _ => unreachable!(),
                 }),
                 #[cfg(feature = "socket-udp")]
-                Socket::Udp(socket) => socket.dispatch(inner, |inner, response| {
-                    respond(inner, IpPacket::Udp(response))
+                Socket::Udp(socket) => socket.dispatch(&mut inner.as_context(), |inner, response| {
+                    respond(inner.as_context(), IpPacket::Udp(response))
                 }),
                 #[cfg(feature = "socket-tcp")]
-                Socket::Tcp(socket) => socket.dispatch(inner, |inner, response| {
-                    respond(inner, IpPacket::Tcp(response))
+                Socket::Tcp(socket) => socket.dispatch(&mut inner.as_context(), |inner, response| {
+                    respond(inner.as_context(), IpPacket::Tcp(response))
                 }),
-	        #[cfg(feature = "ohua")]
-		Socket::OhuaTcp(socket) => socket.dispatch(inner, |inner, response| {
-		    respond(inner, IpPacket::Tcp(response))
-		}),
                  #[cfg(feature = "socket-dhcpv4")]
-                Socket::Dhcpv4(socket) => socket.dispatch(inner, |inner, response| {
-                    respond(inner, IpPacket::Dhcpv4(response))
+                Socket::Dhcpv4(socket) => socket.dispatch(&mut inner.as_context(), |inner, response| {
+                    respond(inner.as_context(), IpPacket::Dhcpv4(response))
                 }),
                 #[cfg(feature = "socket-dns")]
-                Socket::Dns(ref mut socket) => socket.dispatch(inner, |inner, response| {
-                    respond(inner, IpPacket::Udp(response))
-                }),
+                Socket::Dns(ref mut socket) => socket.dispatch(&mut inner.as_context(), |inner, response| {
+                    respond(inner.as_context(), IpPacket::Udp(response))
+                }),*/
+                  othersocket => {
+                      net_debug!("Sorry, only Ohua Tcp sockets supported for now"); Ok(())}
               };
 
            match result {
@@ -1292,97 +1268,144 @@ impl<'a> OInterface<'a> {
                 }
                 Ok(()) => {}
             }
-        }
+        };
         emitted_any
-        )
+    }
+
+    #[cfg(feature = "proto-sixlowpan-fragmentation")]
+    fn sixlowpan_egress<D>(&mut self, device: &mut D) -> Result<bool>
+    where
+        D: for<'d> Device<'d>,
+    {
+        let SixlowpanOutPacket {
+            packet_len,
+            sent_bytes,
+            ..
+        } = &self.out_packets.sixlowpan_out_packet;
+
+        if *packet_len == 0 {
+            return Ok(false);
+        }
+
+        if *packet_len > *sent_bytes {
+            match device.transmit().ok_or(Error::Exhausted) {
+                Ok(tx_token) => {
+                    if let Err(e) = self.inner.dispatch_ieee802154_out_packet(
+                        tx_token,
+                        &mut self.out_packets.sixlowpan_out_packet,
+                    ) {
+                        net_debug!("failed to transmit: {}", e);
+                    }
+
+                    // Reset the buffer when we transmitted everything.
+                    if self.out_packets.sixlowpan_out_packet.finished() {
+                        self.out_packets.sixlowpan_out_packet.reset();
+                    }
+                }
+                Err(e) => {
+                    net_debug!("failed to transmit: {}", e);
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     #[cfg(feature = "ohua")]
     #[allow(dead_code)]
-    fn socket_egress_tcp(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
+    //Reminder: The 'normal' socket egress takes a mutable reference to the device.
+    //          We don't do this, because device is another (to-be) component.
+    //          While we also don't want the device to be down here in the Interface code
+    //         (meaning we may have to factor it out later anyways) we'll keep on passing it
+    //         around as owned here at least.
+
+
+    fn socket_egress_tcp<D>(&'a mut self, mut device: D, sockets: &mut SocketSet<'a>) -> bool
     where
         D: for<'d> Device<'d>,
     {
-        let _caps = device.capabilities();
+        let Self {
+            out_packets: _out_packets,
+            ..
+        } = self;
+        //let _caps = device.capabilities();
 
         let mut emitted_any = false;
 
+        // Todo: currently sockets are an extra thing, but we need to make sockets and
+        //       interface one component. Once that's done, adapt iteration here
+
         for handle in 0..sockets.size() {
-            // Remove gives uus a Socket<'a>, while get/iter_mut gives us &mut Socket<'a>
-            //Question: Why do we need to do this? TCP/IP should be one component
-            //          and should be able to share refs.
-           match sockets.remove_item(handle) {
-
-                None => (), // Can't take out a none.
-                Some(mut socket_item) => {
-                    // steal/borrow
-                    // Question: Why don't we need that let_ macro here?
+            if let Some(mut socket_item) = sockets.remove_item(handle)
+            {// Panics if it fails
+                if socket_item
+                    .meta
+                    .egress_permitted(self.inner.now,
+                                      |ip_addr| self.inner.has_neighbor(&ip_addr))
+                {
                     let inner = self.inner.take().unwrap();
-                    let _out_packets = self.out_packets.take().unwrap();
+                    match socket_item.socket {
+                        #[cfg(feature = "socket-tcp")]
+                        Socket::OhuaTcp(tcp_socket) => {
+                            let (innerp, device, metap, socketp, res) =
+                                enter_sending_recursion(inner, &mut device, socket_item.meta, DispatchCall::Pre(device_independent_emit), tcp_socket);
 
-                    if socket_item
-                        .meta
-                        .egress_permitted(inner.now,
-                              |ip_addr| inner.has_neighbor(&ip_addr))
-                    {
-                        match socket_item.socket {
-                            #[cfg(feature = "socket-tcp")]
-                            Socket::OhuaTcp(tcp_socket) => {
-
-                                let (innerp, devicep, metap, socketp, res) =
-                                    enter_sending_recursion(inner, device, socket_item.meta, DispatchCall::Pre(device_independent_emit), tcp_socket);
-
-                                // return what we have stolen/borrowed
-                                sockets.insert(
-                                    handle,
-                                    Item {
-                                        meta: metap,
-                                        socket: Socket::OhuaTcp(socketp),
-                                    });
-                                let x = self.device.replace(devicep);
-                                assert_none!(x);
-                                let y = self.inner.replace(innerp);
-                                assert_none!(y);
-                                match res {
-                                    Ok((emitted, true)) => {
-                                        emitted_any = emitted_any || emitted;
-                                    }
-                                    Ok((_, false)) => {
-                                        break;
-                                    }
-                                    Err(err) => {
-                                        // FIXME what about the state changes?!
-                                        return Err(err);
-                                    }
+                            // return what we have stolen/borrowed
+                            sockets.readd_stolen_socket(socketp,metap, handle);
+                            // Put the inner interface back in place and assert
+                            // the field was None before
+                            assert_none!(self.inner.replace(innerp));
+                            match res {
+                                Ok((emitted, true)) => {
+                                    emitted_any = emitted_any || emitted;
+                                }
+                                Ok((_, false)) => {
+                                    break;
+                                }
+                                Err(err) => {
+                                    // FIXME what about the state changes?!
+                                    // New error handling doesn't return here any more
+                                    // return Err(err);
+                                    net_debug!("{}: cannot dispatch egress packet: {}", metap.handle, err);
                                 }
                             }
-                            _ => panic!("Only TCP sockets supported!"),
                         }
+                        _ => panic!("Only TCP sockets supported!"),
                     }
-                    else {
-                        // return what we have stolen/borrowed
-                        let swapped_inner =
-                            self.inner.replace(inner);
-                        assert_none!(swapped_inner);
-                        let swapped_out_packets =
-                            self.out_packets.replace(_out_packets);
-                        assert_none!(swapped_out_packets);
-                    }
+
                 }
+
+                else {
+                    // return what we have stolen/borrowed
+                    let swapped_out_packets =
+                        self.out_packets.replace(_out_packets);
+                    assert_none!(swapped_out_packets);
+                }
+
+
             }
         }
        emitted_any
     }
 }
 
+//Reminder:
+//  I changed the type of this function to take a reference to the
+//  inner interface. While we actually can not pass around references
+//  between components, we already know that Interface an InnerInterface
+//  are one component. So either a method/function is part of that component
+//  or it must not get a reference or copy of them anyway
+//  since we do not send around states. -> If this function ends up in compile scope, it needs to take the whole component. Otherwise it's fine to use references here
+
 #[cfg(feature = "ohua")]
-fn enter_sending_recursion<'a, DeviceT, E>(
-    mut inner: OInterfaceInner<'a>,
-    mut device: DeviceT,
+fn enter_sending_recursion<'a, DeviceT>(
+    mut inner: &'a mut OInterfaceInner<'a>,
+    device: & mut DeviceT,
     mut meta: Meta, // meta data external to the socket impl.(neighbor_cache)
-    disp_call: DispatchCall<E>,
-    mut socket: OhuaTcpSocket,
-) -> (OInterfaceInner<'a>, DeviceT, Meta, OhuaTcpSocket<'a>, Result<(bool, bool)>)
+    disp_call: DispatchCall,
+    mut socket: OhuaTcpSocket<'a>,
+) -> (&'a mut OInterfaceInner<'a>, &'a mut DeviceT, Meta, OhuaTcpSocket<'a>, Result<(bool, bool)>)
 where
     DeviceT: for<'d> Device<'d>,
 {
@@ -1394,10 +1417,15 @@ where
     // once if we want it to be a single stateful node later on.
     let res = socket.dispatch_by_call(&mut inner, disp_call);
     match res {
-        DispatchResult::Pre(pre_result) => match pre_result {
-            Ok((data, (tcp_repr_p, ip_repr, is_keep_alive))) => {
+        DispatchResult::Pre(pre_result) =>
+            match pre_result {
+            Ok(None) => (inner, device, meta, socket,
+                        // we didn't emit anything because dispatch_before returned early
+                        // but that's ok in the new version of smoltcp
+                        Ok((false, true))),
+            Ok(Some((data, (tcp_repr_p, ip_repr, is_keep_alive)))) => {
                 let neighbor_addr = Some(ip_repr.dst_addr());
-                match send_to_device(&inner, &mut device, data) {
+                match send_to_device(&inner, device, data) {
                     Ok(()) => enter_sending_recursion(
                         inner,
                         device,
@@ -1411,24 +1439,22 @@ where
                         // `NeighborCache` already takes care of rate limiting the neighbor discovery
                         // requests from the socket. However, without an additional rate limiting
                         // mechanism, we would spin on every socket that has yet to discover its
-                        // neighboor.
+                        // neighbor.
                         meta.neighbor_missing(
                             inner.now,
                             neighbor_addr.expect("non-IP response packet"),
                         );
                         (inner, device, meta, socket, Ok((false, false)))
-                    }
+                    },
                     Err(err) => {
-                        net_debug!("{}: cannot dispatch egress packet: {}", meta.handle, err);
                         (inner, device, meta, socket,
                          Err(err))
-                    }
+                    },
                 }
             }
             Err(Error::Exhausted) => (inner, device, meta, socket,
                  Ok((false, true))), // nothing to transmit
             Err(err) => {
-                net_debug!("{}: cannot dispatch egress packet: {}", meta.handle, err);
                 (inner, device, meta, socket,
                  Err(err))
             }
@@ -1440,14 +1466,14 @@ where
 }
 
 #[cfg(feature = "ohua")]
-fn device_independent_emit<'a,'b,'c>(
-    inner: &'a mut  OInterfaceInner<'b>,
-    reprs: (IpRepr, TcpRepr<'c>),
+fn device_independent_emit(
+    inner: &mut OInterfaceInner,
+    reprs: (IpRepr, TcpRepr),
 ) -> Result<Vec<u8>>
 {
     let as_packet = IpPacket::Tcp(reprs);
 
-    let mut device = OhuaSocket::new();
+    let mut device = OhuaRawSocket::new();
 
     // error handling in the original code seems broken here:
     // this is part of socked_result
@@ -1455,8 +1481,8 @@ fn device_independent_emit<'a,'b,'c>(
 
     // TODO dispatch_ip just returns the result of the consume call.
     // need to make sure that we do not swallow this here..
-    // REMINDER: So actually it would be let
-    inner.dispatch_ip(tx_token, as_packet)?;
+    // Reminder: Dont forget to thread actual _out_packets through here instead of None
+    inner.dispatch_ip(tx_token, as_packet, None)?;
 
 
     let d = device.data.borrow_mut().take();
@@ -1478,7 +1504,7 @@ fn socket_egress_tcp_pre<'a>(
 
     let response = IpPacket::Tcp((ip_repr, tcp_repr));
 
-    let device = OhuaSocket::new();
+    let device = OhuaRawSocket::new();
 
     // error handling in the original code seems broken here:
     // this is part of socked_result
@@ -2159,13 +2185,13 @@ impl<'a> OInterfaceInner<'a> {
     #[cfg(feature = "socket-raw")]
     fn raw_socket_filter<'frame>(
         &mut self,
-        sockets: &mut SocketSet,
-        ip_repr: &IpRepr,
-        ip_payload: &'frame [u8],
+        _sockets: &mut SocketSet,
+        _ip_repr: &IpRepr,
+        _ip_payload: &'frame [u8],
     ) -> bool {
         // ToDo: Reactivate as soon as all Sockets use the same InnerInterface again
         //       (i.e. they're all on our version)
-        let mut handled_by_raw_socket = false;
+        let handled_by_raw_socket = false;
        /*
         // Pass every IP packet to all raw sockets we have registered.
         for raw_socket in sockets
@@ -2256,11 +2282,11 @@ impl<'a> OInterfaceInner<'a> {
         }
     }
 
-    // process_ethernet found an incomming IPv4 packet and called process_ipv4
-    // again ignore wrongly adressed packages (this time at ip level)
-    // match the concrete protocoll (tcp/dhcp/igmp/...) and call
-    // self.process_$concretepprotocoll
-    // if no concrete protocoll applies or adress unreachable  -> send response icmp-unreachable
+    // process_ethernet found an incoming IPv4 packet and called process_ipv4
+    // again ignore wrongly addressed packages (this time at ip level)
+    // match the concrete protocol (tcp/dhcp/igmp/...) and call
+    // self.process_$concrete_protocol
+    // if no concrete protocol applies or address unreachable  -> send response icmp-unreachable
     #[cfg(feature = "proto-ipv4")]
     fn process_ipv4<'output, 'payload: 'output, T: AsRef<[u8]> + ?Sized>(
         &mut self,
@@ -2513,8 +2539,8 @@ impl<'a> OInterfaceInner<'a> {
     fn process_icmpv6<'frame>(
         &mut self,
         _sockets: &mut SocketSet,
-        ip_repr: IpRepr,
-        ip_payload: &'frame [u8],
+        _ip_repr: IpRepr,
+        _ip_payload: &'frame [u8],
     ) -> Option<IpPacket<'frame>> {
         // ToDo: Support ICMP
         return None; /*
@@ -2915,7 +2941,7 @@ impl<'a> OInterfaceInner<'a> {
 
         for tcp_socket in sockets
             .items_mut()
-            .filter_map(|i| tcp_ohua::Socket::downcast_mut(&mut i.socket))
+            .filter_map(|i| tcp_ohua::OhuaTcpSocket::downcast_mut(&mut i.socket))
         {
             if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
                 return tcp_socket
@@ -3653,6 +3679,7 @@ impl<'a> OInterfaceInner<'a> {
             ))
         })
     }
+
 }
 
 #[cfg(test)]
@@ -3926,6 +3953,7 @@ mod test {
     #[test]
     #[cfg(feature = "socket-udp")]
     fn test_icmp_reply_size() {
+
         #[cfg(feature = "proto-ipv6")]
         use crate::wire::Icmpv6DstUnreachable;
         #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]

@@ -1,4 +1,3 @@
-#![no_std] // ToDo: Inserted because Either is std by default, but do I need to?
 // Heads up! Before working on this file you should read, at least, RFC 793 and
 // the parts of RFC 1122 that discuss TCP. Consult RFC 7414 when implementing
 // a new feature.
@@ -7,7 +6,7 @@ use core::fmt::Display;
 #[cfg(feature = "async")]
 use core::task::Waker;
 use core::{cmp, fmt, mem};
-use either::*;
+use crate::Error;
 
 
 #[cfg(feature = "async")]
@@ -2231,13 +2230,17 @@ impl<'a> OhuaTcpSocket<'a> {
     }
 
     #[cfg(feature = "ohua")]
-
+    /// The original dispatch function returns Result<(), E>, whereby OK() is
+    /// returned either when everything worked, or when there was an early return
+    /// because of socket state or timeout
+    /// This means None comming from this function should not throw an error downstream
+    /// ie.e no ok_or
     pub(crate) fn dispatch_before(
         &mut self, cx: &mut OContext
-    ) -> Either<(),((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
+    ) -> Option<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
    {
         if self.tuple.is_none() {
-            return Either::Left(());
+            return None;
         }
 
         if self.remote_last_ts.is_none() {
@@ -2298,9 +2301,9 @@ impl<'a> OhuaTcpSocket<'a> {
             // If we have spent enough time in the TIME-WAIT state, close the socket.
             tcp_trace!("TIME-WAIT timer expired");
             self.reset();
-            return Either::Left(());
+            return None;
         } else {
-            return Either::Left(());
+            return None;
         }
 
         // NOTE(unwrap): we check tuple is not None the first thing in this function.
@@ -2340,7 +2343,7 @@ impl<'a> OhuaTcpSocket<'a> {
             }
 
             // We never transmit anything in the LISTEN state.
-            State::Listen => return Either::Left(()),
+            State::Listen => return None,
 
             // We transmit a SYN in the SYN-SENT state.
             // We transmit a SYN|ACK in the SYN-RECEIVED state.
@@ -2468,7 +2471,7 @@ impl<'a> OhuaTcpSocket<'a> {
         // and we can readily derive a TcpReprP.
         let ip_repr_c = ip_repr.clone();
         let tcp_repr = TcpReprP::from(repr);
-        Either::Right(
+        Some(
             ((ip_repr, repr)
             ,(
                 tcp_repr,
@@ -2589,20 +2592,28 @@ impl<'a> OhuaTcpSocket<'a> {
     }
 
     #[cfg(feature = "ohua")]
-    pub(crate) fn dispatch_by_call<E>(&mut self, cx: &mut OContext, d: DispatchCall<E>) -> DispatchResult<E> {
+    pub(crate) fn dispatch_by_call(&mut self, cx: &mut OContext, d: DispatchCall) -> DispatchResult {
         match d {
-            DispatchCall::Pre(emit) =>
+            DispatchCall::Pre(emit) => {
+                let packets_or_early = self.dispatch_before(cx);
+                match packets_or_early {
+                    None => DispatchResult::Pre(Ok(None)),
+                    Some((reprs, reprs_cpy))
+                        => DispatchResult::Pre(emit(cx, reprs).map(|res|Some((res, reprs_cpy))))
+                }
+            }
+            /*
                 DispatchResult::Pre(
-                    // monadic programming in Rust
-                    // to me this is absolutely weird: monadic programming facilitates imperative
-                    // programming but Rust is already an imperative language!
+                    // dispatch_before either early returns Ok()
+                    // or returns the packet representations
+                    // for further processing
                     self.dispatch_before(cx)
-                        .right() // turns an : Either () (packages) to an Option(packages)
+                        //.ok_or(())
                         .and_then(|(reprs,c)|{
-                            // and here is the according functor map
-                            emit(cx, reprs).map(|x| (x,c))
+                            //emit
+                            emit(cx, reprs)//.map(|x| (x,c))
                         })
-                ),
+                ),*/
             DispatchCall::Post(tcp_repr, is_keep_alive) => {
                 self.dispatch_after(cx, (tcp_repr, is_keep_alive));
                 DispatchResult::Post
@@ -2631,14 +2642,14 @@ impl<'a> OhuaTcpSocket<'a> {
 // }
 
 #[cfg(feature = "ohua")]
-pub enum DispatchResult<E> {
-    Pre(Result<(Vec<u8>, (TcpReprP,IpRepr, bool)), E>),
+pub enum DispatchResult{
+    Pre(Result<Option<(Vec<u8>, (TcpReprP,IpRepr, bool))>, Error>),
     Post
 }
 
 #[cfg(feature = "ohua")]
-pub enum DispatchCall<E> {
-    Pre(fn(&mut OContext, (IpRepr, TcpRepr)) -> Result<Vec<u8>, E>),
+pub enum DispatchCall {
+    Pre(fn(&mut OContext, (IpRepr, TcpRepr)) -> Result<Vec<u8>, Error>),
     Post(TcpReprP, bool)
 }
 
