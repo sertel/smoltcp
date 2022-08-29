@@ -18,7 +18,7 @@ use crate::wire::{
     IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber,
     TCP_HEADER_LEN,
 };
-// ToDo : Remove all 'ohua'feature flags herre ...the whole thing is ohua-only
+// ToDo : Remove all 'ohua' feature flags here ...the whole thing is ohua-only
 // #[cfg(feature = "ohua")]
 use crate::wire::TcpReprP;
 //use crate::{Error, Result};
@@ -2602,18 +2602,7 @@ impl<'a> OhuaTcpSocket<'a> {
                         => DispatchResult::Pre(emit(cx, reprs).map(|res|Some((res, reprs_cpy))))
                 }
             }
-            /*
-                DispatchResult::Pre(
-                    // dispatch_before either early returns Ok()
-                    // or returns the packet representations
-                    // for further processing
-                    self.dispatch_before(cx)
-                        //.ok_or(())
-                        .and_then(|(reprs,c)|{
-                            //emit
-                            emit(cx, reprs)//.map(|x| (x,c))
-                        })
-                ),*/
+
             DispatchCall::Post(tcp_repr, is_keep_alive) => {
                 self.dispatch_after(cx, (tcp_repr, is_keep_alive));
                 DispatchResult::Post
@@ -2970,10 +2959,15 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_established() -> TestSocket {
+    pub(crate) fn socket_established() -> TestSocket {
         socket_established_with_buffer_sizes(64, 64)
     }
 
+    pub(crate) fn socket_established_with_endpoints(local:IpEndpoint, remote:IpEndpoint) -> TestSocket {
+        let mut s = socket_established_with_buffer_sizes(64, 64);
+        s.tuple = Some(Tuple{local, remote});
+        s
+    }
 
     fn socket_fin_wait_1() -> TestSocket {
         let mut s = socket_established();

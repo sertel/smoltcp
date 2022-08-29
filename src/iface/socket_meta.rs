@@ -28,6 +28,7 @@ impl Default for NeighborState {
     }
 }
 
+// REMINDER: Make Meta pub(crate) again when possible
 /// Network socket metadata.
 ///
 /// This includes things that only external (to the socket, that is) code
@@ -35,7 +36,7 @@ impl Default for NeighborState {
 /// itself.
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct Meta {
+pub struct Meta {
     /// Handle of this socket within its enclosing `SocketSet`.
     /// Mainly useful for debug output.
     pub(crate) handle: SocketHandle,

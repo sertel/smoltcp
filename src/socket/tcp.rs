@@ -2581,8 +2581,14 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_established() -> TestSocket {
+    pub(crate) fn socket_established() -> TestSocket {
         socket_established_with_buffer_sizes(64, 64)
+    }
+
+    pub(crate) fn socket_established_with_endpoints(local:IpEndpoint, remote:IpEndpoint) -> TestSocket {
+        let mut s = socket_established_with_buffer_sizes(64, 64);
+        s.tuple = Some(Tuple{local, remote});
+        s
     }
 
     fn socket_fin_wait_1() -> TestSocket {

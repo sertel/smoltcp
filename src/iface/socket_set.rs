@@ -17,10 +17,11 @@ impl<'a> SocketStorage<'a> {
     pub const EMPTY: Self = Self { inner: None };
 }
 
+// REMINDER: Make Item and Meta pub(crate) again when possible
 /// An item of a socket set.
 #[derive(Debug)]
-pub(crate) struct Item<'a> {
-    pub(crate) meta: Meta,
+pub struct Item<'a> {
+    pub meta: Meta,
     pub(crate) socket: Socket<'a>,
 }
 
@@ -89,7 +90,7 @@ impl<'a> SocketSet<'a> {
     }
 
     //Reminder: Remove this method when we don't pass around sockets any more
-    pub fn readd_stolen_socket<T: AnySocket<'a>>(&mut self, socket: T, meta:Meta, handle:usize) -> SocketHandle {
+    pub fn re_add_stolen_socket<T: AnySocket<'a>>(&mut self, socket: T, meta:Meta, handle:usize) -> SocketHandle {
         let put = |index: usize, slot: &mut SocketStorage<'a>, socket: Socket<'a>| {
             net_trace!("[{}]: adding", index);
             let handle = SocketHandle(index);
@@ -125,6 +126,10 @@ impl<'a> SocketSet<'a> {
         self.sockets[handle].inner.take()
    }
 
+    // Reminder: See the last two reminders
+    pub fn same(handle:SocketHandle, other:usize) -> bool {
+        handle.0 == other
+    }
     /// Get a socket from the set by its handle, as mutable.
     ///
     /// # Panics
