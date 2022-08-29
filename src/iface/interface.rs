@@ -4729,7 +4729,6 @@ mod test {
    #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_tcp_socket_egress() {
-        use crate::socket::tcp::Socket;
         use crate::socket::tcp::test::{
             socket_established_with_endpoints, TestSocket};
         use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};

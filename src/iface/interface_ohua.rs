@@ -8,9 +8,9 @@ use managed::{ManagedMap, ManagedSlice};
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 use super::fragmentation::PacketAssemblerSet;
 use super::socket_set::SocketSet;
-use crate::iface::{Routes, SocketHandle};
+use crate::iface::{Routes};
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-use crate::iface::{NeighborAnswer, NeighborCache, Context};
+use crate::iface::{NeighborAnswer, NeighborCache};
 use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use crate::rand::Rand;
 #[cfg(feature = "socket-dhcpv4")]
@@ -1107,14 +1107,13 @@ impl<'a> OInterface<'a> {
         D: for<'d> Device<'d>,
     {
         let mut processed_any = false;
+        let mut inner = self.inner.take().unwrap();
         let Self {
             // inner,
-            fragments: ref mut _fragments,
-            out_packets: _out_packets,
-            ..
+          fragments: ref mut _fragments,
+          out_packets: _out_packets,
+          ..
         } = self;
-
-        let mut inner = self.inner.take().unwrap();
 
         while let Some((rx_token, tx_token)) = device.receive() {
             let res = rx_token.consume(inner.now, |frame| {
@@ -1292,18 +1291,21 @@ impl<'a> OInterface<'a> {
             sent_bytes,
             ..
         } = &self.out_packets.sixlowpan_out_packet;
-        let mut inner = self.inner.take().unwrap();
+        //let mut inner = self.inner.take().unwrap();
         if *packet_len == 0 {
+
             return Ok(false);
         }
 
         if *packet_len > *sent_bytes {
             match device.transmit().ok_or(Error::Exhausted) {
                 Ok(tx_token) => {
-                    if let Err(e) = inner.dispatch_ieee802154_out_packet(
+                    if let Err(e) =
+                    let_mut_field!(self.inner,
+                        inner.dispatch_ieee802154_out_packet(
                         tx_token,
                         &mut self.out_packets.sixlowpan_out_packet,
-                    ) {
+                    )) {
                         net_debug!("failed to transmit: {}", e);
                     }
 
@@ -1318,10 +1320,10 @@ impl<'a> OInterface<'a> {
             }
             // Put the inner interface back in place and assert
             // the field was None before
-            assert_none!(self.inner.replace(inner));
+            //assert_none!(self.inner.replace(inner));
             Ok(true)
         } else {
-            assert_none!(self.inner.replace(inner));
+            //assert_none!(self.inner.replace(inner));
             Ok(false)
         }
     }
@@ -1335,7 +1337,7 @@ impl<'a> OInterface<'a> {
     //         around as owned here at least.
 
 
-    fn socket_egress_tcp<DeviceT>(&'a mut self, mut device: &mut DeviceT, sockets: &mut SocketSet<'a>) -> bool
+    fn socket_egress_tcp<DeviceT>(&'a mut self, device: &mut DeviceT, sockets: &mut SocketSet<'a>) -> bool
     where
         DeviceT: for<'d> Device<'d>,
     {
@@ -1421,7 +1423,7 @@ impl<'a> OInterface<'a> {
 #[cfg(feature = "ohua")]
 fn enter_sending_recursion<'a, DeviceT>(
     mut inner: OInterfaceInner<'a>,
-    mut device: &mut DeviceT,
+    device: &mut DeviceT,
     mut meta: Meta, // meta data external to the socket impl.(neighbor_cache)
     disp_call: DispatchCall,
     mut socket: OhuaTcpSocket<'a>,
@@ -1493,12 +1495,12 @@ where
 #[cfg(feature = "ohua")]
 fn send_to_device<'a, DeviceT: for<'d> Device<'d>>(
     inner: &'a OInterfaceInner<'a>,
-    deviceRef: &mut DeviceT,
+    device_ref: &mut DeviceT,
     data: Vec<u8>
 ) -> Result<()>
 {
     // get the token which holds the reference to the device
-    let tx_token = deviceRef.transmit().ok_or(Error::Exhausted)?;
+    let tx_token = device_ref.transmit().ok_or(Error::Exhausted)?;
     let tx_len = data.len();
     tx_token.consume(
         // FIXME this is really a bit annoying because the timestamp is not even used
