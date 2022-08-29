@@ -6,9 +6,9 @@ use std::str;
 
 use log::debug;
 use ohua_util::store::Store;
-use smoltcp::iface::{InterfaceBuilder, NeighborCache};
+use smoltcp::iface::{FragmentsCache, InterfaceBuilder, NeighborCache, SocketSet};
 use smoltcp::phy::{Device, Medium, TunTapInterface, wait as phy_wait};
-use smoltcp::socket::{TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{tcp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
@@ -43,12 +43,12 @@ fn main() {
     let mut store = Store::default();
 
 
-    let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 64]);
-    let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 128]);
-    let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
+    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 64]);
+    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 128]);
+    let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
 
 
-    let device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
+    let mut device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
     let fd = device.as_raw_fd();
     let neighbor_cache = NeighborCache::new(BTreeMap::new());
     let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
@@ -57,26 +57,40 @@ fn main() {
     ];
 
     let medium = device.capabilities().medium;
-    let mut builder = InterfaceBuilder::new(device, vec![]).ip_addrs(ip_addrs);
+    let mut builder = InterfaceBuilder::new().ip_addrs(ip_addrs);
+
+    let ipv4_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
+    builder = builder.ipv4_fragments_cache(ipv4_frag_cache);
+
+
+    let mut out_packet_buffer = [0u8; 1280];
+
+    let sixlowpan_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
+    builder = builder
+            .sixlowpan_fragments_cache(sixlowpan_frag_cache)
+            .sixlowpan_out_packet_cache(&mut out_packet_buffer[..]);
+
+
     if medium == Medium::Ethernet {
         builder = builder
             .hardware_addr(ethernet_addr.into())
             .neighbor_cache(neighbor_cache);
     }
-    let mut iface = builder.finalize();
+    let mut iface = builder.finalize(&mut device);
 
-    let tcp_handle = iface.add_socket(tcp_socket);
+    let mut sockets = SocketSet::new(vec![]);
+    let tcp_handle = sockets.add(tcp_socket);
 
     loop {
         let timestamp = Instant::now();
-        match iface.poll(timestamp) {
+        match iface.poll(timestamp, &mut device, & mut sockets) {
             Ok(_) => {}
             Err(e) => {
                 debug!("poll error: {}", e);
             }
         }
 
-        let socket = iface.get_socket::<TcpSocket>(tcp_handle);
+        let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
         if !socket.is_open() {
             socket.listen(6969).unwrap();
         }
@@ -96,6 +110,6 @@ fn main() {
             socket.close();
         }
 
-        phy_wait(fd, iface.poll_delay(timestamp)).expect("wait error");
+        phy_wait(fd, iface.poll_delay(timestamp, &sockets)).expect("wait error");
     }
 }

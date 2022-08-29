@@ -1,11 +1,11 @@
-use ohua_util::*;
+mod ohua_util;
 
 use std::str;
 
 use log::debug;
 use ohua_util::init_components::{init_app,init_device,init_tcp_ip_stack};
 use smoltcp::phy::{Device, Medium, wait as phy_wait};
-use smoltcp::socket::{TcpSocket};
+use smoltcp::socket::{tcp_ohua};
 use smoltcp::time::Instant;
 
 fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
@@ -36,22 +36,23 @@ fn main() {
      \/__/         \/__/         \/__/         \/__/                  \|__|
 "#
     );
+    let mut out_packet_buffer = [0u8; 1280];
     let mut app = init_app();
-    let (device_n, fd) = init_device();
-    let (mut tcp_ip_stack, socket_handle) = init_tcp_ip_stack(device_n);
+    let (device, fd) = init_device();
+    let (mut tcp_ip_stack,mut sockets, socket_handle,mut device) = init_tcp_ip_stack(device, &mut out_packet_buffer);
     assert_eq!(app.testnum, 3);
-    assert_eq!(tcp_ip_stack.device().capabilities().medium, Medium::Ethernet);
+    assert_eq!(device.capabilities().medium, Medium::Ethernet);
 
     loop {
         let timestamp = Instant::now();
-        match tcp_ip_stack.poll(timestamp) {
+        match tcp_ip_stack.poll(timestamp,&mut device, &mut sockets) {
             Ok(_) => {}
             Err(e) => {
                 debug!("poll error: {}", e);
             }
         }
 
-        let socket = tcp_ip_stack.get_socket::<TcpSocket>(socket_handle);
+        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(socket_handle);
         if !socket.is_open() {
             socket.listen(6969).unwrap();
         }
@@ -74,6 +75,6 @@ fn main() {
             socket.close();
         }
 
-        phy_wait(fd, tcp_ip_stack.poll_delay(timestamp)).expect("wait error");
+        phy_wait(fd, tcp_ip_stack.poll_delay(timestamp,&sockets)).expect("wait error");
     }
 }
