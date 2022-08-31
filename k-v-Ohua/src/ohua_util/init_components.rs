@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::RawFd;
+use log::debug;
 
 use crate::ohua_util::store::Store;
 use smoltcp::iface::{FragmentsCache, OInterface, OInterfaceBuilder, NeighborCache, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, Medium, TunTapInterface};
 use smoltcp::socket::{tcp_ohua};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
+use std::str;
+
 
 
 
@@ -16,12 +19,14 @@ pub fn init_device() -> (TunTapInterface, RawFd) {
     (device, file_descriptor)
 }
 
-// TODO: For now I only have one Socket. In general I'll have to consider multiple sockets.
-//   In that scenario I'll need send_data and receive_data structures, that link the sockets to the
-//   app data to send or received via them
-pub fn init_tcp_ip_stack<'a>(mut device: TunTapInterface, out_packet_buffer: &'a mut [u8])
-                             ->  (OInterface<'a>,SocketSet, SocketHandle, TunTapInterface) {
 
+pub fn init_stack_and_device(out_packet_buffer: &mut [u8]) -> (OInterface, TunTapInterface, RawFd)
+{
+    // First init the device
+    let mut device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
+    let file_descriptor = device.as_raw_fd();
+
+    // Second: assemble the interface components
     let neighbor_cache = NeighborCache::new(BTreeMap::new());
     let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let ip_addrs = [
@@ -32,7 +37,7 @@ pub fn init_tcp_ip_stack<'a>(mut device: TunTapInterface, out_packet_buffer: &'a
     let mut builder = OInterfaceBuilder::new().ip_addrs(ip_addrs);
 
     //ToDo: fragments, outpacket and 6loWPAN are guarded by compiler flags.
-    //      However, without them I get a panic from the Builder
+    //      However, if I don't init them I get a panic from the Builder
     //      -> clarify why/is there is no default and if there should be one.
     let ipv4_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
     builder = builder.ipv4_fragments_cache(ipv4_frag_cache);
@@ -47,32 +52,75 @@ pub fn init_tcp_ip_stack<'a>(mut device: TunTapInterface, out_packet_buffer: &'a
             .neighbor_cache(neighbor_cache);
     }
     let iface = builder.finalize(&mut device);
+
+    (iface, device, file_descriptor)
+}
+
+// ToDo: The SocketSet contains a 'ManagedSlice' of sockets and this seems to borrow
+//       Sockets/Buffers so I need a lifetime annotation here
+//       What does it mean to make it static, in particular considering that we will
+//       send it between stack and app?
+pub fn init_app_and_sockets() -> (App, SocketSet<'static>){
+    let store = Store::default();
     let mut sockets = SocketSet::new(vec![]);
 
     let tcp_rx_buffer = tcp_ohua::SocketBuffer::new(vec![0; 64]);
     let tcp_tx_buffer = tcp_ohua::SocketBuffer::new(vec![0; 128]);
     let tcp_socket = tcp_ohua::OhuaTcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
-    let tcp_handle = sockets.add::<tcp_ohua::OhuaTcpSocket>(tcp_socket);
-    (iface, sockets, tcp_handle, device)
+    let tcp_socket_handle = sockets.add::<tcp_ohua::OhuaTcpSocket>(tcp_socket);
+    (App{ store, tcp_socket_handle}, sockets)
 }
 
-pub fn init_app()-> App{
-    let store = Store::default();
-    App{ store: store , testnum:3}
-}
-
+// ToDo: For now the App has just one socket but I'll need a more sophisticated way
+//       to store/identify handles for different sockets
 pub struct App {
     store: Store,
-    pub testnum:i16,
+    tcp_socket_handle: SocketHandle,
 }
 
 
 impl App {
-    pub fn do_app_stuff(self){
-        println!("Doing app stuff")
+
+    pub fn do_app_stuff(&mut self, mut sockets: &mut SocketSet) -> (){
+        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(self.tcp_socket_handle);
+        if !socket.is_open() {
+            socket.listen(6969).unwrap();
+        }
+
+        if socket.may_recv() {
+            // ToDo: Check how we will handle function references i.e. can we "tell"
+            //       Socket.recv to use this/any partcular function?
+            //       Simple way out would be to cleanly separate and have the socket return the pure buffer
+            let input = socket.recv(App::process_octets).unwrap();
+            if socket.can_send() && !input.is_empty() {
+                debug!(
+                    "tcp:6969 send data: {:?}",
+                    str::from_utf8(input.as_ref()).unwrap_or("(invalid utf8)")
+                );
+                let outbytes = self.handle_message(input);
+                socket.send_slice(&outbytes[..]).unwrap();
+            }
+        } else if socket.may_send() {
+            debug!("tcp:6969 close");
+            socket.close();
+        }
     }
-    pub fn handle_message(&mut self, input:Vec<u8>)-> Vec<u8> {
+
+    fn handle_message(&mut self, input:Vec<u8>)-> Vec<u8> {
         self.store.handle_message(&input)
+    }
+
+
+    fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
+        let recvd_len = octets.len();
+        let data = octets.to_owned();
+        if !data.is_empty(){
+            debug!(
+                "tcp:6970 recv data: {:?}",
+                str::from_utf8(data.as_ref()).unwrap_or("(invalid utf8)")
+            );
+        }
+        (recvd_len, data)
     }
 }
