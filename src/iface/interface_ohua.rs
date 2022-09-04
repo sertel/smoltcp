@@ -32,6 +32,42 @@ use crate::phy::OhuaRawSocket;
 
 use crate::iface::interface::{IpPacket};
 
+/*
+/// We start with transformation relevant Code because I go nuts otherwise with this
+/// biblical-proportion modules
+
+// Reminder: I need to pass a lifetime here because the original poll derived it from the &self
+fn poll<'a, D>(timestamp:Instant, ip_stack: &'a mut OInterface,
+               device: &mut D, sockets: &mut SocketSet<'a>)-> Result<bool>
+  where D: for<'d> Device<'d>
+{
+    ip_stack.inner_mut().now = timestamp;
+    // .. we leave out the optional fragments stuff for now
+
+    let mut readiness_may_have_changed = false;
+    let mut stack_opnt = Some(ip_stack);
+    loop {
+        let mut ip_stack_local = stack_opnt.take().unwrap();
+        let processed_any = ip_stack_local.socket_ingress(device, sockets);
+        let emitted_any = ip_stack_local.socket_egress_ohua(device, sockets);
+
+        //#[cfg(feature = "proto-igmp")]
+        //self.igmp_egress()?;
+
+        if processed_any || emitted_any {
+            readiness_may_have_changed = true;
+        } else {
+            break;
+        }
+        stack_opnt.replace(ip_stack_local);
+    }
+
+    Ok(readiness_may_have_changed)
+}
+*/
+
+
+
 pub(crate) struct FragmentsBuffer<'a> {
     #[cfg(feature = "proto-ipv4-fragmentation")]
     ipv4_fragments: PacketAssemblerSet<'a, Ipv4FragKey>,
@@ -979,6 +1015,22 @@ impl<'a> OInterface<'a> {
         &mut self.inner_mut().routes
     }
 
+
+    pub fn poll_wrapper<'s, D>(
+        &mut self,
+        timestamp: Instant,
+        mut device_obj: D,
+        mut sockets_obj: SocketSet<'s>,
+    ) -> (Result<bool>, D, SocketSet<'s>)
+    where
+        D: for<'d> Device<'d>,
+    {
+        let device = &mut device_obj;
+        let sockets = &mut sockets_obj;
+        let result = self.poll(timestamp, device, sockets);
+        (result, device_obj, sockets_obj)
+    }
+
     /// Transmit packets queued in the given sockets, and receive packets queued
     /// in the device.
     ///
@@ -1330,14 +1382,8 @@ impl<'a> OInterface<'a> {
 
     #[cfg(feature = "ohua")]
     #[allow(dead_code)]
-    //Reminder: The 'normal' socket egress takes a mutable reference to the device.
-    //          We don't do this, because device is another (to-be) component.
-    //          While we also don't want the device to be down here in the Interface code
-    //         (meaning we may have to factor it out later anyways) we'll keep on passing it
-    //         around as owned here at least.
-
-
-    fn socket_egress_tcp<DeviceT>(&'a mut self, device: &mut DeviceT, sockets: &mut SocketSet<'a>) -> bool
+    // ToDo: Sockets wont live as long as the interface.
+    fn socket_egress_ohua<DeviceT>(&'a mut self, device: &mut DeviceT, sockets: &mut SocketSet<'a>) -> bool
     where
         DeviceT: for<'d> Device<'d>,
     {
@@ -5156,7 +5202,7 @@ mod test {
         let result_len = socket2.send_slice(msg);
         assert_eq!(result_len, Ok(msg_len));
         net_debug!("running egress with ohua version");
-        assert_eq!(iface2.socket_egress_tcp(&mut device2, &mut sockets2 ), true);
+        assert_eq!(iface2.socket_egress_ohua(&mut device2, &mut sockets2 ), true);
 
         // Again make sure the data arrived at the device level:
         // Devices sending buffer should contain our packet

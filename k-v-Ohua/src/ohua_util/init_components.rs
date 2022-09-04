@@ -8,6 +8,7 @@ use smoltcp::iface::{FragmentsCache, OInterface, OInterfaceBuilder, NeighborCach
 use smoltcp::phy::{Device, Medium, TunTapInterface};
 use smoltcp::socket::{tcp_ohua};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
+// use smoltcp::{Result}; can't import bcs it's private
 use std::str;
 
 
@@ -82,7 +83,18 @@ pub struct App {
 
 impl App {
 
-    pub fn do_app_stuff(&mut self, mut sockets: &mut SocketSet) -> (){
+    pub fn do_app_stuff<'s, E: std::fmt::Display>(
+        &mut self,
+        mut sockets_obj: SocketSet<'s>,
+        poll_res: Result<bool, E>)
+        -> (bool, SocketSet<'s>) {
+            match poll_res {
+                Ok(_) => {}
+                Err(e) => {
+                debug!("poll error: {}", e);
+            }
+        }
+        let sockets = &mut sockets_obj;
         let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(self.tcp_socket_handle);
         if !socket.is_open() {
             socket.listen(6969).unwrap();
@@ -105,12 +117,14 @@ impl App {
             debug!("tcp:6969 close");
             socket.close();
         }
+        // Just make it clear -> this turns the outer recursion into an endless loop:
+        let should_continue = true;
+        (should_continue, sockets_obj)
     }
 
     fn handle_message(&mut self, input:Vec<u8>)-> Vec<u8> {
         self.store.handle_message(&input)
     }
-
 
     fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
         let recvd_len = octets.len();
