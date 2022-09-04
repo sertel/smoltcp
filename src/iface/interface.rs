@@ -24,11 +24,11 @@ use crate::{Error, Result};
 
 pub(crate) struct FragmentsBuffer<'a> {
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    ipv4_fragments: PacketAssemblerSet<'a, Ipv4FragKey>,
+    pub(crate) ipv4_fragments: PacketAssemblerSet<'a, Ipv4FragKey>,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
-    sixlowpan_fragments: PacketAssemblerSet<'a, SixlowpanFragKey>,
+    pub(crate) sixlowpan_fragments: PacketAssemblerSet<'a, SixlowpanFragKey>,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
-    sixlowpan_fragments_cache_timeout: Duration,
+    pub(crate) sixlowpan_fragments_cache_timeout: Duration,
     #[cfg(not(any(
         feature = "proto-ipv4-fragmentation",
         feature = "proto-sixlowpan-fragmentation"
@@ -38,7 +38,7 @@ pub(crate) struct FragmentsBuffer<'a> {
 
 pub(crate) struct OutPackets<'a> {
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
-    sixlowpan_out_packet: SixlowpanOutPacket<'a>,
+    pub(crate) sixlowpan_out_packet: SixlowpanOutPacket<'a>,
 
     #[cfg(not(feature = "proto-sixlowpan-fragmentation"))]
     _lifetime: core::marker::PhantomData<&'a ()>,
@@ -47,7 +47,7 @@ pub(crate) struct OutPackets<'a> {
 impl<'a> OutPackets<'a> {
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     /// Returns `true` when all the data of the outgoing buffers are transmitted.
-    fn all_transmitted(&self) -> bool {
+    pub(crate) fn all_transmitted(&self) -> bool {
         self.sixlowpan_out_packet.finished() || self.sixlowpan_out_packet.is_empty()
     }
 }
@@ -58,9 +58,9 @@ pub(crate) struct SixlowpanOutPacket<'a> {
     /// The buffer that holds the unfragmented 6LoWPAN packet.
     buffer: ManagedSlice<'a, u8>,
     /// The size of the packet without the IEEE802.15.4 header and the fragmentation headers.
-    packet_len: usize,
+    pub(crate) packet_len: usize,
     /// The amount of bytes that already have been transmitted.
-    sent_bytes: usize,
+    pub(crate) sent_bytes: usize,
 
     /// The datagram size that is used for the fragmentation headers.
     datagram_size: u16,
@@ -95,7 +95,7 @@ impl<'a> SixlowpanOutPacket<'a> {
 
     /// Return `true` when everything is transmitted.
     #[inline]
-    fn finished(&self) -> bool {
+    pub(crate) fn finished(&self) -> bool {
         self.packet_len == self.sent_bytes
     }
 
@@ -106,7 +106,7 @@ impl<'a> SixlowpanOutPacket<'a> {
     }
 
     // Reset the buffer.
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.packet_len = 0;
         self.datagram_size = 0;
         self.datagram_tag = 0;
@@ -152,29 +152,29 @@ pub struct Interface<'a> {
 /// methods on the `Interface` in this time (since its `device` field is borrowed
 /// exclusively). However, it is still possible to call methods on its `inner` field.
 pub struct InterfaceInner<'a> {
-    caps: DeviceCapabilities,
-    now: Instant,
+    pub(crate) caps: DeviceCapabilities,
+    pub(crate) now: Instant,
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-    neighbor_cache: Option<NeighborCache<'a>>,
+    pub(crate) neighbor_cache: Option<NeighborCache<'a>>,
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-    hardware_addr: Option<HardwareAddress>,
+    pub(crate) hardware_addr: Option<HardwareAddress>,
     #[cfg(feature = "medium-ieee802154")]
-    sequence_no: u8,
+    pub(crate) sequence_no: u8,
     #[cfg(feature = "medium-ieee802154")]
-    pan_id: Option<Ieee802154Pan>,
+    pub(crate) pan_id: Option<Ieee802154Pan>,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
-    tag: u16,
-    ip_addrs: ManagedSlice<'a, IpCidr>,
+    pub(crate) tag: u16,
+    pub(crate) ip_addrs: ManagedSlice<'a, IpCidr>,
     #[cfg(feature = "proto-ipv4")]
-    any_ip: bool,
-    routes: Routes<'a>,
+    pub(crate) any_ip: bool,
+    pub(crate) routes: Routes<'a>,
     #[cfg(feature = "proto-igmp")]
-    ipv4_multicast_groups: ManagedMap<'a, Ipv4Address, ()>,
+    pub(crate) ipv4_multicast_groups: ManagedMap<'a, Ipv4Address, ()>,
     /// When to report for (all or) the next multicast group membership via IGMP
     #[cfg(feature = "proto-igmp")]
-    igmp_report_state: IgmpReportState,
-    rand: Rand,
+    pub(crate) igmp_report_state: IgmpReportState,
+    pub(crate) rand: Rand,
 }
 
 /// A builder structure used for creating a network interface.
@@ -556,7 +556,7 @@ let iface = builder.finalize(&mut device);
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "medium-ethernet")]
-enum EthernetPacket<'a> {
+pub(crate) enum EthernetPacket<'a> {
     #[cfg(feature = "proto-ipv4")]
     Arp(ArpRepr),
     Ip(IpPacket<'a>),
@@ -688,7 +688,7 @@ fn icmp_reply_payload_len(len: usize, mtu: usize, header_len: usize) -> usize {
 }
 
 #[cfg(feature = "proto-igmp")]
-enum IgmpReportState {
+pub(crate) enum IgmpReportState {
     Inactive,
     ToGeneralQuery {
         version: IgmpVersion,
@@ -1408,13 +1408,13 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-    fn check_hardware_addr(addr: &HardwareAddress) {
+    pub(crate) fn check_hardware_addr(addr: &HardwareAddress) {
         if !addr.is_unicast() {
             panic!("Ethernet address {} is not unicast", addr)
         }
     }
 
-    fn check_ip_addrs(addrs: &[IpCidr]) {
+    pub(crate) fn check_ip_addrs(addrs: &[IpCidr]) {
         for cidr in addrs {
             if !cidr.address().is_unicast() && !cidr.address().is_unspecified() {
                 panic!("IP address {} is not unicast", cidr.address())
@@ -1423,7 +1423,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ieee802154")]
-    fn get_sequence_number(&mut self) -> u8 {
+    pub(crate) fn get_sequence_number(&mut self) -> u8 {
         let no = self.sequence_no;
         self.sequence_no = self.sequence_no.wrapping_add(1);
         no
@@ -1456,7 +1456,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     /// Check whether the interface has the given IP address assigned.
-    fn has_ip_addr<T: Into<IpAddress>>(&self, addr: T) -> bool {
+    pub(crate) fn has_ip_addr<T: Into<IpAddress>>(&self, addr: T) -> bool {
         let addr = addr.into();
         self.ip_addrs.iter().any(|probe| probe.address() == addr)
     }
@@ -1488,7 +1488,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ethernet")]
-    fn process_ethernet<'frame, T: AsRef<[u8]>>(
+    pub(crate) fn process_ethernet<'frame, T: AsRef<[u8]>>(
         &mut self,
         sockets: &mut SocketSet,
         frame: &'frame T,
@@ -1531,7 +1531,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ip")]
-    fn process_ip<'frame, T: AsRef<[u8]>>(
+    pub(crate) fn process_ip<'frame, T: AsRef<[u8]>>(
         &mut self,
         sockets: &mut SocketSet,
         ip_payload: &'frame T,
@@ -1561,7 +1561,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ieee802154")]
-    fn process_ieee802154<'output, 'payload: 'output, T: AsRef<[u8]> + ?Sized>(
+    pub(crate) fn process_ieee802154<'output, 'payload: 'output, T: AsRef<[u8]> + ?Sized>(
         &mut self,
         sockets: &mut SocketSet,
         sixlowpan_payload: &'payload T,
@@ -1823,7 +1823,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(all(feature = "medium-ethernet", feature = "proto-ipv4"))]
-    fn process_arp<'frame, T: AsRef<[u8]>>(
+    pub(crate) fn process_arp<'frame, T: AsRef<[u8]>>(
         &mut self,
         timestamp: Instant,
         eth_frame: &EthernetFrame<&'frame T>,
@@ -1892,7 +1892,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "socket-raw")]
-    fn raw_socket_filter<'frame>(
+    pub(crate) fn raw_socket_filter<'frame>(
         &mut self,
         sockets: &mut SocketSet,
         ip_repr: &IpRepr,
@@ -1914,7 +1914,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-ipv6")]
-    fn process_ipv6<'frame, T: AsRef<[u8]> + ?Sized>(
+    pub(crate) fn process_ipv6<'frame, T: AsRef<[u8]> + ?Sized>(
         &mut self,
         sockets: &mut SocketSet,
         ipv6_packet: &Ipv6Packet<&'frame T>,
@@ -1946,7 +1946,7 @@ impl<'a> InterfaceInner<'a> {
     /// Given the next header value forward the payload onto the correct process
     /// function.
     #[cfg(feature = "proto-ipv6")]
-    fn process_nxt_hdr<'frame>(
+    pub(crate) fn process_nxt_hdr<'frame>(
         &mut self,
         sockets: &mut SocketSet,
         ipv6_repr: Ipv6Repr,
@@ -1994,7 +1994,7 @@ impl<'a> InterfaceInner<'a> {
     // self.process_$concrete_protocol
     // if no concrete protocol applies or address unreachable  -> send response icmp-unreachable
     #[cfg(feature = "proto-ipv4")]
-    fn process_ipv4<'output, 'payload: 'output, T: AsRef<[u8]> + ?Sized>(
+    pub(crate) fn process_ipv4<'output, 'payload: 'output, T: AsRef<[u8]> + ?Sized>(
         &mut self,
         sockets: &mut SocketSet,
         ipv4_packet: &Ipv4Packet<&'payload T>,
@@ -2148,7 +2148,7 @@ impl<'a> InterfaceInner<'a> {
     /// Checks if an incoming packet has a broadcast address for the interfaces
     /// associated ipv4 addresses.
     #[cfg(feature = "proto-ipv4")]
-    fn is_subnet_broadcast(&self, address: Ipv4Address) -> bool {
+    pub(crate) fn is_subnet_broadcast(&self, address: Ipv4Address) -> bool {
         self.ip_addrs
             .iter()
             .filter_map(|own_cidr| match own_cidr {
@@ -2161,13 +2161,13 @@ impl<'a> InterfaceInner<'a> {
 
     /// Checks if an ipv4 address is broadcast, taking into account subnet broadcast addresses
     #[cfg(feature = "proto-ipv4")]
-    fn is_broadcast_v4(&self, address: Ipv4Address) -> bool {
+    pub(crate) fn is_broadcast_v4(&self, address: Ipv4Address) -> bool {
         address.is_broadcast() || self.is_subnet_broadcast(address)
     }
 
     /// Checks if an ipv4 address is unicast, taking into account subnet broadcast addresses
     #[cfg(feature = "proto-ipv4")]
-    fn is_unicast_v4(&self, address: Ipv4Address) -> bool {
+    pub(crate) fn is_unicast_v4(&self, address: Ipv4Address) -> bool {
         address.is_unicast() && !self.is_subnet_broadcast(address)
     }
 
@@ -2177,7 +2177,7 @@ impl<'a> InterfaceInner<'a> {
     /// Membership must not be reported immediately in order to avoid flooding the network
     /// after a query is broadcasted by a router; this is not currently done.
     #[cfg(feature = "proto-igmp")]
-    fn process_igmp<'frame>(
+    pub(crate) fn process_igmp<'frame>(
         &mut self,
         ipv4_repr: Ipv4Repr,
         ip_payload: &'frame [u8],
@@ -2238,7 +2238,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-ipv6")]
-    fn process_icmpv6<'frame>(
+    pub(crate) fn process_icmpv6<'frame>(
         &mut self,
         _sockets: &mut SocketSet,
         ip_repr: IpRepr,
@@ -2384,7 +2384,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-ipv6")]
-    fn process_hopbyhop<'frame>(
+    pub(crate) fn process_hopbyhop<'frame>(
         &mut self,
         sockets: &mut SocketSet,
         ipv6_repr: Ipv6Repr,
@@ -2422,7 +2422,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-ipv4")]
-    fn process_icmpv4<'frame>(
+    pub(crate) fn process_icmpv4<'frame>(
         &mut self,
         _sockets: &mut SocketSet,
         ip_repr: IpRepr,
@@ -2479,7 +2479,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-ipv4")]
-    fn icmpv4_reply<'frame, 'icmp: 'frame>(
+    pub(crate) fn icmpv4_reply<'frame, 'icmp: 'frame>(
         &self,
         ipv4_repr: Ipv4Repr,
         icmp_repr: Icmpv4Repr<'icmp>,
@@ -2521,7 +2521,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-ipv6")]
-    fn icmpv6_reply<'frame, 'icmp: 'frame>(
+    pub(crate) fn icmpv6_reply<'frame, 'icmp: 'frame>(
         &self,
         ipv6_repr: Ipv6Repr,
         icmp_repr: Icmpv6Repr<'icmp>,
@@ -2542,7 +2542,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(any(feature = "socket-udp", feature = "socket-dns"))]
-    fn process_udp<'frame>(
+    pub(crate) fn process_udp<'frame>(
         &mut self,
         sockets: &mut SocketSet,
         ip_repr: IpRepr,
@@ -2618,7 +2618,7 @@ impl<'a> InterfaceInner<'a> {
     // if a socket accepts call socket.process(ip_packet, tcp_packet)
     // and if this return a valid reply return the reply
     #[cfg(feature = "socket-tcp")]
-    fn process_tcp<'frame>(
+    pub(crate) fn process_tcp<'frame>(
         &mut self,
         sockets: &mut SocketSet,
         ip_repr: IpRepr,
@@ -2654,7 +2654,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ethernet")]
-    fn dispatch<Tx>(&mut self, tx_token: Tx, packet: EthernetPacket) -> Result<()>
+    pub(crate) fn dispatch<Tx>(&mut self, tx_token: Tx, packet: EthernetPacket) -> Result<()>
     where
         Tx: TxToken,
     {
@@ -2681,7 +2681,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ethernet")]
-    fn dispatch_ethernet<Tx, F>(&mut self, tx_token: Tx, buffer_len: usize, f: F) -> Result<()>
+    pub(crate) fn dispatch_ethernet<Tx, F>(&mut self, tx_token: Tx, buffer_len: usize, f: F) -> Result<()>
     where
         Tx: TxToken,
         F: FnOnce(EthernetFrame<&mut [u8]>),
@@ -2705,11 +2705,11 @@ impl<'a> InterfaceInner<'a> {
         })
     }
 
-    fn in_same_network(&self, addr: &IpAddress) -> bool {
+    pub(crate) fn in_same_network(&self, addr: &IpAddress) -> bool {
         self.ip_addrs.iter().any(|cidr| cidr.contains_addr(addr))
     }
 
-    fn route(&self, addr: &IpAddress, timestamp: Instant) -> Result<IpAddress> {
+    pub(crate) fn route(&self, addr: &IpAddress, timestamp: Instant) -> Result<IpAddress> {
         // Send directly.
         if self.in_same_network(addr) || addr.is_broadcast() {
             return Ok(*addr);
@@ -2722,7 +2722,7 @@ impl<'a> InterfaceInner<'a> {
         }
     }
 
-    fn has_neighbor(&self, addr: &IpAddress) -> bool {
+    pub(crate) fn has_neighbor(&self, addr: &IpAddress) -> bool {
         match self.route(addr, self.now) {
             Ok(_routed_addr) => match self.caps.medium {
                 #[cfg(feature = "medium-ethernet")]
@@ -2747,7 +2747,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-    fn lookup_hardware_addr<Tx>(
+    pub(crate) fn lookup_hardware_addr<Tx>(
         &mut self,
         tx_token: Tx,
         src_addr: &IpAddress,
@@ -2888,14 +2888,14 @@ impl<'a> InterfaceInner<'a> {
         Err(Error::Unaddressable)
     }
 
-    fn flush_cache(&mut self) {
+    pub(crate) fn flush_cache(&mut self) {
         #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
         if let Some(cache) = self.neighbor_cache.as_mut() {
             cache.flush()
         }
     }
 
-    fn dispatch_ip<Tx: TxToken>(
+    pub(crate) fn dispatch_ip<Tx: TxToken>(
         &mut self,
         tx_token: Tx,
         packet: IpPacket,
@@ -2976,7 +2976,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(all(feature = "medium-ieee802154", feature = "proto-sixlowpan"))]
-    fn dispatch_ieee802154<Tx: TxToken>(
+    pub(crate) fn dispatch_ieee802154<Tx: TxToken>(
         &mut self,
         ll_dst_a: Ieee802154Address,
         ip_repr: &IpRepr,
@@ -3263,7 +3263,7 @@ impl<'a> InterfaceInner<'a> {
         feature = "medium-ieee802154",
         feature = "proto-sixlowpan-fragmentation"
     ))]
-    fn dispatch_ieee802154_out_packet<Tx: TxToken>(
+    pub(crate) fn dispatch_ieee802154_out_packet<Tx: TxToken>(
         &mut self,
         tx_token: Tx,
         out_packet: &mut SixlowpanOutPacket,
@@ -3331,7 +3331,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-igmp")]
-    fn igmp_report_packet<'any>(
+    pub(crate) fn igmp_report_packet<'any>(
         &self,
         version: IgmpVersion,
         group_addr: Ipv4Address,
@@ -3358,7 +3358,7 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-igmp")]
-    fn igmp_leave_packet<'any>(&self, group_addr: Ipv4Address) -> Option<IpPacket<'any>> {
+    pub(crate) fn igmp_leave_packet<'any>(&self, group_addr: Ipv4Address) -> Option<IpPacket<'any>> {
         self.ipv4_address().map(|iface_addr| {
             let igmp_repr = IgmpRepr::LeaveGroup { group_addr };
             IpPacket::Igmp((

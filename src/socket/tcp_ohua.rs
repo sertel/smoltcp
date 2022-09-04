@@ -11,7 +11,7 @@ use crate::Error;
 
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
-use crate::socket::{OContext, PollAt};
+use crate::socket::{Context, PollAt};
 use crate::storage::{Assembler, RingBuffer};
 use crate::time::{Duration, Instant};
 use crate::wire::{
@@ -748,7 +748,7 @@ impl<'a> OhuaTcpSocket<'a> {
     /// is unspecified.
     pub fn connect<T, U>(
         &mut self,
-        cx: &mut OContext,
+        cx: &mut Context,
         remote_endpoint: T,
         local_endpoint: U,
     ) -> Result<(), ConnectError>
@@ -803,12 +803,12 @@ impl<'a> OhuaTcpSocket<'a> {
     }
 
     #[cfg(test)]
-    fn random_seq_no(_cx: &mut OContext) -> TcpSeqNumber {
+    fn random_seq_no(_cx: &mut Context) -> TcpSeqNumber {
         TcpSeqNumber(10000)
     }
 
     #[cfg(not(test))]
-    fn random_seq_no(cx: &mut OContext) -> TcpSeqNumber {
+    fn random_seq_no(cx: &mut Context) -> TcpSeqNumber {
         TcpSeqNumber(cx.rand().rand_u32() as i32)
     }
 
@@ -1251,7 +1251,7 @@ impl<'a> OhuaTcpSocket<'a> {
 
     fn challenge_ack_reply(
         &mut self,
-        cx: &mut OContext,
+        cx: &mut Context,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
@@ -1265,7 +1265,7 @@ impl<'a> OhuaTcpSocket<'a> {
         return Some(self.ack_reply(ip_repr, repr));
     }
 
-    pub(crate) fn accepts(&self, _cx: &mut OContext, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
+    pub(crate) fn accepts(&self, _cx: &mut Context, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
         if self.state == State::Closed {
             return false;
         }
@@ -1295,7 +1295,7 @@ impl<'a> OhuaTcpSocket<'a> {
 
     pub(crate) fn process(
         &mut self,
-        cx: &mut OContext,
+        cx: &mut Context,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
@@ -1858,7 +1858,7 @@ impl<'a> OhuaTcpSocket<'a> {
         }
     }
 
-    fn seq_to_transmit(&self, cx: &mut OContext) -> bool {
+    fn seq_to_transmit(&self, cx: &mut Context) -> bool {
         let ip_header_len = match self.tuple.unwrap().local.addr {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
@@ -1949,9 +1949,9 @@ impl<'a> OhuaTcpSocket<'a> {
         }
     }
 
-    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut OContext, emit: F) -> Result<(), E>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
     where
-        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<(), E>,
+        F: FnOnce(&mut Context, (IpRepr, TcpRepr)) -> Result<(), E>,
     {
         if self.tuple.is_none() {
             return Ok(());
@@ -2236,7 +2236,7 @@ impl<'a> OhuaTcpSocket<'a> {
     /// This means None comming from this function should not throw an error downstream
     /// ie.e no ok_or
     pub(crate) fn dispatch_before(
-        &mut self, cx: &mut OContext
+        &mut self, cx: &mut Context
     ) -> Option<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
    {
         if self.tuple.is_none() {
@@ -2485,10 +2485,10 @@ impl<'a> OhuaTcpSocket<'a> {
     #[cfg(feature = "ohua")]
     #[allow(dead_code)] // the normal interface from the original code
     pub(crate) fn dispatch_device<F, E>(
-        &mut self, cx: &mut OContext, (ip_repr,repr):(IpRepr,TcpRepr), emit: F
+        &mut self, cx: &mut Context, (ip_repr,repr):(IpRepr,TcpRepr), emit: F
     ) -> Result<(), E>
     where
-        F: FnOnce(&mut OContext, (IpRepr, TcpRepr)) -> Result<(), E>,
+        F: FnOnce(&mut Context, (IpRepr, TcpRepr)) -> Result<(), E>,
     {
         emit(cx, (ip_repr, repr))
     }
@@ -2497,7 +2497,7 @@ impl<'a> OhuaTcpSocket<'a> {
     #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_after(
         &mut self,
-        cx: &mut OContext,
+        cx: &mut Context,
         (repr, is_keep_alive): (TcpReprP, bool)
     )//ToDo: Original Code returned Ok here. Why don't we?!
     {
@@ -2551,7 +2551,7 @@ impl<'a> OhuaTcpSocket<'a> {
     }
 
     #[allow(clippy::if_same_then_else)]
-    pub(crate) fn poll_at(&self, cx: &mut OContext) -> PollAt {
+    pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
         // The logic here mirrors the beginning of dispatch() closely.
         if self.tuple.is_none() {
             // No one to talk to, nothing to transmit.
@@ -2592,7 +2592,7 @@ impl<'a> OhuaTcpSocket<'a> {
     }
 
     #[cfg(feature = "ohua")]
-    pub(crate) fn dispatch_by_call(&mut self, cx: &mut OContext, d: DispatchCall) -> DispatchResult {
+    pub(crate) fn dispatch_by_call(&mut self, cx: &mut Context, d: DispatchCall) -> DispatchResult {
         match d {
             DispatchCall::Pre(emit) => {
                 let packets_or_early = self.dispatch_before(cx);
@@ -2614,13 +2614,13 @@ impl<'a> OhuaTcpSocket<'a> {
 
 // TODO What is the proper way to make this work without explicitly threading the socket?
 // The problem was that this function require an explict lifetime of 'a for the mutable borrow:
-// pub(crate) fn dispatch_c<'a>(socket: &'a mut OhuaTcpSocket<'a>, cx: &OContext, d: Call<'a>) -> Results<'a> 
+// pub(crate) fn dispatch_c<'a>(socket: &'a mut OhuaTcpSocket<'a>, cx: &Context, d: Call<'a>) -> Results<'a> 
 // As a result, in the code that calls this function, I could not pass the borrowed socket on to
 // the recursive call.
 // I couldn't even get it fixed when state threading:
 // I suppose the only way to fix this would be to completely remove the borrowing.
 // #[cfg(feature = "ohua")]
-// pub fn dispatch_c<'a>(socket:&'a mut OhuaTcpSocket<'a>, cx: &OContext, d: Call) -> Results<'a> {
+// pub fn dispatch_c<'a>(socket:&'a mut OhuaTcpSocket<'a>, cx: &Context, d: Call) -> Results<'a> {
 //     match d {
 //         Call::Pre => Results::Pre(socket.dispatch_before(cx)),
 //         Call::Post(tcp_repr, is_keep_alive) => {
@@ -2638,7 +2638,7 @@ pub enum DispatchResult{
 
 #[cfg(feature = "ohua")]
 pub enum DispatchCall {
-    Pre(fn(&mut OContext, (IpRepr, TcpRepr)) -> Result<Vec<u8>, Error>),
+    Pre(fn(&mut Context, (IpRepr, TcpRepr)) -> Result<Vec<u8>, Error>),
     Post(TcpReprP, bool)
 }
 
@@ -2765,7 +2765,7 @@ pub(crate) mod test {
 
     pub(crate) struct TestSocket {
         pub(crate) socket: OhuaTcpSocket<'static>,
-        pub(crate) cx: OContext<'static>,
+        pub(crate) cx: Context<'static>,
     }
 
     impl Deref for TestSocket {
@@ -2905,7 +2905,7 @@ pub(crate) mod test {
         let tx_buffer = SocketBuffer::new(vec![0; tx_len]);
         let mut socket = OhuaTcpSocket::new(rx_buffer, tx_buffer);
         socket.set_ack_delay(None);
-        let cx = OContext::mock();
+        let cx = Context::mock();
         TestSocket { socket, cx }
     }
 

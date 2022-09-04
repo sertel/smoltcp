@@ -2,7 +2,7 @@ use core::cmp::min;
 #[cfg(feature = "async")]
 use core::task::Waker;
 
-use crate::iface::OContext;
+use crate::iface::Context;
 use crate::socket::PollAt;
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
@@ -261,7 +261,7 @@ impl<'a> ORawSocket<'a> {
 
     pub(crate) fn process(
         &mut self,
-        cx: &mut OContext,
+        cx: &mut Context,
         ip_repr: &IpRepr,
         payload: &[u8],
     ) {
@@ -294,9 +294,9 @@ impl<'a> ORawSocket<'a> {
     }
 
 
-    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut OContext, emit: F) -> Result<(), E>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
     where
-        F: FnOnce(&mut OContext, (IpRepr, &[u8])) -> Result<(), E>,
+        F: FnOnce(&mut Context, (IpRepr, &[u8])) -> Result<(), E>,
     {
         let ip_protocol = self.ip_protocol;
         let ip_version = self.ip_version;
@@ -377,7 +377,7 @@ impl<'a> ORawSocket<'a> {
         }
     }
 
-    pub(crate) fn poll_at(&self, _cx: &mut OContext) -> PollAt {
+    pub(crate) fn poll_at(&self, _cx: &mut Context) -> PollAt {
         if self.tx_buffer.is_empty() {
             PollAt::Ingress
         } else {
@@ -486,7 +486,7 @@ mod test {
                 #[test]
                 fn test_send_dispatch() {
                     let mut socket = $socket(buffer(0), buffer(1));
-                    let mut cx = OContext::mock();
+                    let mut cx = Context::mock();
 
                     assert!(socket.can_send());
                     assert_eq!(
@@ -522,7 +522,7 @@ mod test {
                 #[test]
                 fn test_recv_truncated_slice() {
                     let mut socket = $socket(buffer(1), buffer(0));
-                    let mut cx = OContext::mock();
+                    let mut cx = Context::mock();
 
                     assert!(socket.accepts(&$hdr));
                     socket.process(&mut cx, &$hdr, &$payload);
@@ -535,7 +535,7 @@ mod test {
                 #[test]
                 fn test_recv_truncated_packet() {
                     let mut socket = $socket(buffer(1), buffer(0));
-                    let mut cx = OContext::mock();
+                    let mut cx = Context::mock();
 
                     let mut buffer = vec![0; 128];
                     buffer[..$packet.len()].copy_from_slice(&$packet[..]);
@@ -571,7 +571,7 @@ mod test {
         #[cfg(feature = "proto-ipv4")]
         {
             let mut socket = ipv4_locals::socket(buffer(0), buffer(2));
-            let mut cx = OContext::mock();
+            let mut cx = Context::mock();
 
             let mut wrong_version = ipv4_locals::PACKET_BYTES;
             Ipv4Packet::new_unchecked(&mut wrong_version).set_version(6);
@@ -594,7 +594,7 @@ mod test {
         #[cfg(feature = "proto-ipv6")]
         {
             let mut socket = ipv6_locals::socket(buffer(0), buffer(2));
-            let mut cx = OContext::mock();
+            let mut cx = Context::mock();
 
             let mut wrong_version = ipv6_locals::PACKET_BYTES;
             Ipv6Packet::new_unchecked(&mut wrong_version[..]).set_version(4);
@@ -622,7 +622,7 @@ mod test {
         {
             let mut socket = ipv4_locals::socket(buffer(1), buffer(0));
             assert!(!socket.can_recv());
-            let mut cx = OContext::mock();
+            let mut cx = Context::mock();
 
             let mut cksumd_packet = ipv4_locals::PACKET_BYTES;
             Ipv4Packet::new_unchecked(&mut cksumd_packet).fill_checksum();
@@ -649,7 +649,7 @@ mod test {
         {
             let mut socket = ipv6_locals::socket(buffer(1), buffer(0));
             assert!(!socket.can_recv());
-            let mut cx = OContext::mock();
+            let mut cx = Context::mock();
 
             assert_eq!(socket.recv(), Err(RecvError::Exhausted));
             assert!(socket.accepts(&ipv6_locals::HEADER_REPR));

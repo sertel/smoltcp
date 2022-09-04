@@ -12,7 +12,6 @@ size for a buffer, allocate it, and let the networking stack use it.
 */
 
 use crate::iface::Context;
-use crate::iface::OContext;
 use crate::socket::tcp_ohua::OhuaTcpSocket;
 use crate::time::Instant;
 
@@ -97,20 +96,16 @@ impl<'a> Socket<'a> {
             #[cfg(feature = "socket-tcp")]
             Socket::Tcp(s) => s.poll_at(cx),
             #[cfg(feature = "ohua")]
-            Socket::OhuaTcp(_s) =>
-                panic!("Sry. I need to accept two kinds of contexts here and \
-                        haven't implemented this yet "),
+            Socket::OhuaTcp(s) => s.poll_at(cx),
             #[cfg(feature = "ohua")]
-            Socket::OhuaRaw(_s) =>
-                panic!("Sry. I need to accept two kinds of contexts here and \
-                        haven't implemented this yet "),
+            Socket::OhuaRaw(s) =>  s.poll_at(cx),
             #[cfg(feature = "socket-dhcpv4")]
             Socket::Dhcpv4(s) => s.poll_at(cx),
             #[cfg(feature = "socket-dns")]
             Socket::Dns(s) => s.poll_at(cx),
         }
     }
-
+/*
     pub(crate)  fn poll_at_ohua(&self, cx: &mut OContext) -> PollAt {
         match self {
             #[cfg(feature = "ohua")]
@@ -121,6 +116,8 @@ impl<'a> Socket<'a> {
                     is not intended to be used by normal sockets"),
         }
     }
+
+ */
 }
 
 /// A conversion trait for network sockets.
