@@ -90,7 +90,7 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
 )]
 
 use crate::time::Instant;
-use crate::Result;
+use crate::{Error, Result};
 
 #[cfg(all(
     any(feature = "phy-raw_socket", feature = "phy-tuntap_interface"),
@@ -329,6 +329,14 @@ pub trait Device<'a> {
 
     /// Get a description of device capabilities.
     fn capabilities(&self) -> DeviceCapabilities;
+
+    fn send(&'a mut self, timestamp:Instant, packet:Vec<u8>) -> Result<()> {
+        let sending_result
+            = self.transmit().ok_or(Error::Exhausted).and_then(|token|
+                   token.consume(timestamp, packet.len(),
+                     |buffer| Ok(buffer.copy_from_slice(packet.as_slice()))));
+        sending_result
+    }
 }
 
 /// A token to receive a single network packet.
