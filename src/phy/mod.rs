@@ -332,7 +332,10 @@ pub trait Device<'a> {
 
     fn send(&'a mut self, timestamp:Instant, packet:Vec<u8>) -> Result<()> {
         let sending_result
-            = self.transmit().ok_or(Error::Exhausted).and_then(|token|
+            = self.transmit().ok_or_else(|| {
+                        net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                        Error::Exhausted
+                    }).and_then(|token|
                    token.consume(timestamp, packet.len(),
                      |buffer| Ok(buffer.copy_from_slice(packet.as_slice()))));
         sending_result

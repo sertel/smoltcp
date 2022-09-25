@@ -35,12 +35,13 @@ use crate::phy::OhuaRawSocket;
 
 use crate::iface::interface::{IpPacket};
 
-/*
+
 /// We start with transformation relevant Code because I go nuts otherwise with this
 /// biblical-proportion modules
 
 // Reminder: I need to pass a lifetime here because the original poll derived it from the &self
-fn poll<'a, D>(timestamp:Instant, ip_stack: &'a mut OInterface,
+/*
+fn poll<'a, D>(timestamp:Instant, ip_stack: &'a mut OInterface<'a>,
                device: &mut D, sockets: &mut SocketSet<'a>)-> Result<bool>
   where D: for<'d> Device<'d>
 {
@@ -48,11 +49,9 @@ fn poll<'a, D>(timestamp:Instant, ip_stack: &'a mut OInterface,
     // .. we leave out the optional fragments stuff for now
 
     let mut readiness_may_have_changed = false;
-    let mut stack_opnt = Some(ip_stack);
     loop {
-        let mut ip_stack_local = stack_opnt.take().unwrap();
-        let processed_any = ip_stack_local.socket_ingress(device, sockets);
-        let emitted_any = ip_stack_local.socket_egress_ohua(device, sockets);
+        let processed_any = ip_stack.socket_ingress(device, sockets);
+        let emitted_any = ip_stack.socket_egress_ohua(device, sockets);
 
         //#[cfg(feature = "proto-igmp")]
         //self.igmp_egress()?;
@@ -62,14 +61,12 @@ fn poll<'a, D>(timestamp:Instant, ip_stack: &'a mut OInterface,
         } else {
             break;
         }
-        stack_opnt.replace(ip_stack_local);
     }
 
     Ok(readiness_may_have_changed)
 }
+
 */
-
-
 macro_rules! check {
     ($e:expr) => {
         match $e {
@@ -977,26 +974,27 @@ impl<'a> OInterface<'a> {
                 
 
               let mut respond = |inner: &mut Context, response: IpPacket| {
-                neighbor_addr = Some(response.ip_repr().dst_addr());
-                match device.transmit().ok_or(Error::Exhausted) {
-                    Ok(_t) => {
-                        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-                        if let Err(_e) = inner.dispatch_ip(_t, response, Some(_out_packets)) {
-                            net_debug!("failed to dispatch IP: {}", _e);
-                        }
+                    neighbor_addr = Some(response.ip_repr().dst_addr());
+                    let t = device.transmit().ok_or_else(|| {
+                        net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                        Error::Exhausted
+                    })?;
 
-                        #[cfg(not(feature = "proto-sixlowpan-fragmentation"))]
-                        if let Err(_e) = inner.dispatch_ip(_t, response, None) {
-                            net_debug!("failed to dispatch IP: {}", _e);
-                        }
-                        emitted_any = true;
-                    }
-                    Err(e) => {
-                        net_debug!("failed to transmit IP: {}", e);
-                    }
-                }
+                    #[cfg(any(
+                        feature = "proto-ipv4-fragmentation",
+                        feature = "proto-sixlowpan-fragmentation"
+                    ))]
+                    inner.dispatch_ip(t, response, Some(_out_packets))?;
 
-                Ok(())
+                    #[cfg(not(any(
+                        feature = "proto-ipv4-fragmentation",
+                        feature = "proto-sixlowpan-fragmentation"
+                    )))]
+                    inner.dispatch_ip(t, response, None)?;
+
+                    emitted_any = true;
+
+                    Ok(())
               };
 
               let result = match &mut item.socket {
