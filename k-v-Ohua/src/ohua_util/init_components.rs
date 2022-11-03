@@ -21,8 +21,9 @@ pub fn init_device() -> (TunTapInterface, RawFd) {
 }
 
 
-pub fn init_stack_and_device(out_packet_buffer: &mut [u8]) -> (OInterface, TunTapInterface, RawFd)
+pub fn init_stack_and_device() -> (OInterface<'static>, TunTapInterface, RawFd)
 {
+    let mut out_packet_buffer = vec![];// [0u8; 1280];
     // First init the device
     let mut device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
     let file_descriptor = device.as_raw_fd();
