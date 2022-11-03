@@ -3,6 +3,8 @@
 // and RFCs 8200 and 4861 for any IPv6 and NDISC work.
 
 use core::cmp;
+use std::rc::Rc;
+use core::cell::RefCell;
 use managed::{ManagedMap, ManagedSlice};
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
@@ -21,6 +23,33 @@ use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result};
+
+
+/// Reminder : I did it here, because the inner interface needs it and we don't have a
+///         Ohua-version of it for now
+/// Structure to replace sending to a device by local 'emission'
+/// without the need to change the api otherwise
+pub struct LocalTxToken {
+    buffer:Rc<RefCell<Vec<u8>>>,
+}
+
+impl TxToken for LocalTxToken {
+    fn consume<R, F>(self, _timestamp: Instant, len: usize, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut [u8]) -> Result<R>,
+    {
+        let mut buffer = vec![0; len];
+        let result = f(&mut buffer);
+        self.buffer.replace(buffer);
+        result
+    }
+}
+impl LocalTxToken {
+    fn get(&self) -> Vec<u8> {
+        let buffer = self.buffer.take();
+        buffer
+    }
+}
 
 pub(crate) struct FragmentsBuffer<'a> {
     #[cfg(feature = "proto-ipv4-fragmentation")]
@@ -1272,6 +1301,20 @@ impl<'a> Interface<'a> {
 }
 
 impl<'a> InterfaceInner<'a> {
+
+    #[allow(unused)] // unused depending on whether we use the Ohua version
+    pub(crate) fn dispatch_wrapper(
+        &mut self,
+        packet: IpPacket,
+        _out_packet: Option<&mut OutPackets<'_>>,
+    ) -> Result<(Vec<u8>, Instant)> {
+        let mut buffer = Rc::new(RefCell::new(vec![]));
+        let other_handle = buffer.clone();
+        let mut local_token = LocalTxToken{buffer};
+        let dispatch_result = self.dispatch_ip(local_token, packet, _out_packet)?;
+        Ok((other_handle.take(), self.now))
+    }
+
     #[allow(unused)] // unused depending on which sockets are enabled
     pub(crate) fn now(&self) -> Instant {
         self.now
