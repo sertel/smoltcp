@@ -5,7 +5,7 @@ use std::os::unix::io::RawFd;
 use defmt::debug;
 use ohua_util::init_components::{init_app_and_sockets, init_stack_and_device};
 use smoltcp::{Error,Result};
-use smoltcp::iface::{OInterface, SocketSet, poll_4_egress_ask};
+use smoltcp::iface::{OInterface,Interface, SocketSet, poll_4_egress_ask};
 use smoltcp::phy::{Device, TunTapInterface, wait as phy_wait};
 use smoltcp::time::Instant;
 use crate::ohua_util::init_components::App;
@@ -28,8 +28,8 @@ fn main() {
      \/__/         \/__/         \/__/         \/__/                  \|__|
 "#
     );
-    let (mut app, mut sockets):(App, SocketSet) = init_app_and_sockets();
-    let (mut ip_stack, mut device, fd):(OInterface, TunTapInterface, RawFd) = init_stack_and_device();
+    let (mut app, mut sockets):(App, SocketSet<'static>) = init_app_and_sockets();
+    let (mut ip_stack, mut device, fd):(Interface, TunTapInterface, RawFd) = init_stack_and_device();
 
 // ToDo: Currently we send around the actual SocketSet
 //       -> this will not work out of the box, as SocketSet and the Sockets do
@@ -44,18 +44,18 @@ fn main() {
 
 
 fn loop_as_rec(
-    mut app:App, mut ip_stack: OInterface,
-    mut device:TunTapInterface, mut sockets: SocketSet,
+    mut app:App, mut ip_stack: Interface,
+    mut device:TunTapInterface, mut sockets: SocketSet<'static>,
     fd:RawFd)  -> ()
     {
     let timestamp = Instant::now();
-    let (poll_res, ip_stack_poll, device_poll, sockets_poll):
-        (Result<bool>, OInterface, TunTapInterface, SocketSet) =
+    let (poll_res, mut ip_stack_poll, device_poll, sockets_poll):
+        (Result<bool>, Interface, TunTapInterface, SocketSet) =
         poll_4_egress_ask(timestamp, ip_stack, device, sockets);
 
     let (should_continue, sockets_do_app_stuff): (bool, SocketSet) = app.do_app_stuff(sockets_poll, poll_res);
         
-    phy_wait(fd, ip_stack.poll_delay(timestamp, &sockets_do_app_stuff)).expect("wait error");
+    phy_wait(fd, ip_stack_poll.poll_delay(timestamp, &sockets_do_app_stuff)).expect("wait error");
 
 
     if should_continue {

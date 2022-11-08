@@ -4,7 +4,9 @@ use std::os::unix::prelude::RawFd;
 use log::debug;
 
 use crate::ohua_util::store::Store;
-use smoltcp::iface::{FragmentsCache, OInterface, OInterfaceBuilder, NeighborCache, SocketHandle, SocketSet};
+use smoltcp::iface::{FragmentsCache, OInterface, OInterfaceBuilder,
+                     NeighborCache, SocketHandle, SocketSet,
+                     Interface, InterfaceBuilder};
 use smoltcp::phy::{Device, Medium, TunTapInterface};
 use smoltcp::socket::{tcp_ohua};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
@@ -21,7 +23,7 @@ pub fn init_device() -> (TunTapInterface, RawFd) {
 }
 
 
-pub fn init_stack_and_device() -> (OInterface<'static>, TunTapInterface, RawFd)
+pub fn init_stack_and_device() -> (Interface<'static>, TunTapInterface, RawFd)
 {
     let mut out_packet_buffer = vec![];// [0u8; 1280];
     // First init the device
@@ -36,7 +38,7 @@ pub fn init_stack_and_device() -> (OInterface<'static>, TunTapInterface, RawFd)
     ];
 
     let medium = device.capabilities().medium;
-    let mut builder = OInterfaceBuilder::new().ip_addrs(ip_addrs);
+    let mut builder = InterfaceBuilder::new().ip_addrs(ip_addrs);
 
     //ToDo: fragments, outpacket and 6loWPAN are guarded by compiler flags.
     //      However, if I don't init them I get a panic from the Builder
