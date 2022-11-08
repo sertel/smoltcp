@@ -52,18 +52,20 @@ impl LocalTxToken {
 }
 
 // Version `poll_4_egress_ask`
+
 pub fn poll_4_egress_ask<'a, D>(
     timestamp: Instant,
     mut ip_stack: Interface<'a>,
     mut device: D,
-    mut sockets: SocketSet<'a>)
-    -> ( Result<bool>, Interface<'a>, D, SocketSet<'a>)
+    mut sockets: SocketSet<'static>)
+    -> ( Result<bool>, Interface<'a>, D, SocketSet<'static>)
     where D: for<'d> Device<'d>
 {
     ip_stack.inner.now = timestamp;
     // .. we leave out the optional fragments stuff for now
 
     let mut readiness_has_changed = false;
+
     loop {
         let processed_any = false;//ip_stack.socket_ingress(device, sockets);
         // Begin of inlined ip_stack.socket_egress()
@@ -178,7 +180,7 @@ fn is_packet(maybe_packet:Either<PacketTwice, Result<()>>)
 }
 fn as_packet(maybe_packet:Either<PacketTwice, Result<()>>)
     -> PacketTwice {
-    maybe_packet.unwrap_left()
+    maybe_packet.left_or_panic()
 }
 
 
