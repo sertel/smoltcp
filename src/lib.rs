@@ -125,6 +125,9 @@ compile_error!("If you enable the socket feature, you must enable at least one o
 compile_error!("You must enable at most one of the following features: defmt, log");
 
 use core::fmt;
+// Reminder: I introduced std to get the panic! and make Either work :-(
+use std;
+
 
 #[macro_use]
 mod macros;

@@ -22,7 +22,7 @@ use crate::socket::dns;
 use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
-use crate::{Error, Result};
+use crate::{Error, Result, Either};
 
 
 /// Reminder : I did it here, because the inner interface needs it and we don't have a
@@ -50,6 +50,137 @@ impl LocalTxToken {
         buffer
     }
 }
+
+// Version `poll_4_egress_ask`
+pub fn poll_4_egress_ask<'a, D>(
+    timestamp: Instant,
+    mut ip_stack: Interface<'a>,
+    mut device: D,
+    mut sockets: SocketSet<'a>)
+    -> ( Result<bool>, Interface<'a>, D, SocketSet<'a>)
+    where D: for<'d> Device<'d>
+{
+    ip_stack.inner.now = timestamp;
+    // .. we leave out the optional fragments stuff for now
+
+    let mut readiness_has_changed = false;
+    loop {
+        let processed_any = false;//ip_stack.socket_ingress(device, sockets);
+        // Begin of inlined ip_stack.socket_egress()
+        // -> ip_stack.socket_egress(device, sockets);
+        let Interface{
+            inner: mut inner,
+            out_packets: _out_packets,
+            ..
+        } = ip_stack;
+
+        let _caps = device.capabilities();
+        //let mut inner = inner_option.take().unwrap();
+        let mut emitted_any = false;
+
+        for item  in sockets.items_mut() {
+            // check egress permission for socket
+            if !item.meta.egress_permitted( inner.now,
+                    |ip_addr| inner.has_neighbor(&ip_addr))
+            {
+                continue;
+            }
+            let mut neighbor_addr = None;
+
+            let mut result:Result<()>;
+
+            let packet_or_ok = match &mut item.socket {
+                Socket::OhuaTcp(socket) =>
+                    socket.dispatch_before(&mut inner),
+                _ => panic!("Only Ohua TCP sockets supported!"),
+            };//.dispatch_before();
+            if is_packet(packet_or_ok) {
+                let (response_tpl, response_and_bool) = as_packet(packet_or_ok);
+                let response = IpPacket::Tcp(response_tpl);
+                neighbor_addr = Some(response.ip_repr().dst_addr());
+                let sending_token = device.transmit();
+                if sending_token.is_some() {
+                    let local_dispatch_result = inner
+                        .dispatch_local(response, None);
+                    if let Ok((packet, timest)) = local_dispatch_result{
+                        let send_result =
+                            device.consume_token(timest, packet, sending_token.unwrap());
+                        if send_result.is_ok() {
+                            result = Ok(());
+                            // will neither fail nor return early
+                             match &mut item.socket {
+                                Socket::OhuaTcp(socket) => socket.dispatch_after::<Error>(&mut inner, response_and_bool),
+                                _ => panic!("Only Ohua TCP sockets supported!"),
+                            };//item.socket.dispatch_after(response);
+                            emitted_any = true;
+                        } else {
+                            result = send_result
+                        }
+                    } else {
+                        // We get different kinds of Result<Something,E> and
+                        // Rust doesn't know, that in the else branch only the
+                        // E is relevant, so we need to wrap that
+                        result = Err(local_dispatch_result.unwrap_err());
+                    }
+                } else {
+                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                    result = Err(Error::Exhausted);
+                }
+            } else {
+                result = Ok(());
+            }
+
+            match result {
+                Err(Error::Exhausted) => break, // Device buffer full.
+                Err(Error::Unaddressable) => {
+                    // `NeighborCache` already takes care of rate limiting the neighbor discovery
+                    // requests from the socket. However, without an additional rate limiting
+                    // mechanism, we would spin on every socket that has yet to discover its
+                    // neighbor.
+                    item.meta.neighbor_missing(
+                        inner.now,
+                        neighbor_addr.expect("non-IP response packet"),
+                    );
+                    break;
+                }
+                Err(err) => {
+                    net_debug!(
+                        "{}: cannot dispatch egress packet: {}",
+                        item.meta.handle,
+                        err
+                    );
+                }
+                Ok(()) => {}
+            }
+            // End of inlined ip_stack.socket_egress()
+        }
+
+        if processed_any || emitted_any {
+            readiness_has_changed = true;
+        } else {
+            break;
+        }
+    }
+    (Ok(readiness_has_changed), ip_stack, device, sockets)
+}
+// ToDo: ReprP is just a conversion from Repr made in
+//  dispatch_before_optn -> check if that makes sense or should be moved
+//  downstream where it's needed
+type PacketTwice<'a> = ((IpRepr, TcpRepr<'a>), (TcpReprP, IpRepr, bool));
+
+fn is_packet(maybe_packet:Either<PacketTwice, Result<()>>)
+             -> bool {
+    match maybe_packet {
+        Either::Left(_) => false,
+        Either::Right(_) => true
+    }
+
+}
+fn as_packet(maybe_packet:Either<PacketTwice, Result<()>>)
+    -> PacketTwice {
+    maybe_packet.unwrap_left()
+}
+
 
 pub(crate) struct FragmentsBuffer<'a> {
     #[cfg(feature = "proto-ipv4-fragmentation")]
@@ -182,7 +313,7 @@ pub struct Interface<'a> {
 /// exclusively). However, it is still possible to call methods on its `inner` field.
 pub struct InterfaceInner<'a> {
     pub(crate) caps: DeviceCapabilities,
-    pub(crate) now: Instant,
+    pub now: Instant,
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     pub(crate) neighbor_cache: Option<NeighborCache<'a>>,
@@ -1303,7 +1434,7 @@ impl<'a> Interface<'a> {
 impl<'a> InterfaceInner<'a> {
 
     #[allow(unused)] // unused depending on whether we use the Ohua version
-    pub(crate) fn dispatch_wrapper(
+    pub(crate) fn dispatch_local(
         &mut self,
         packet: IpPacket,
         _out_packet: Option<&mut OutPackets<'_>>,

@@ -6,7 +6,7 @@ use core::fmt::Display;
 #[cfg(feature = "async")]
 use core::task::Waker;
 use core::{cmp, fmt, mem};
-use crate::Error;
+use crate::{Either, Error};
 
 
 #[cfg(feature = "async")]
@@ -18,10 +18,10 @@ use crate::wire::{
     IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber,
     TCP_HEADER_LEN,
 };
+use crate::wire::ip::Repr;
 // ToDo : Remove all 'ohua' feature flags here ...the whole thing is ohua-only
 // #[cfg(feature = "ohua")]
 use crate::wire::TcpReprP;
-//use crate::{Error, Result};
 
 macro_rules! tcp_trace {
     ($($arg:expr),*) => (net_log!(trace, $($arg),*));
@@ -2228,6 +2228,20 @@ impl<'a> OhuaTcpSocket<'a> {
 
         Ok(())
     }
+    #[cfg(feature = "ohua")]
+    // I would like this dispatch_before to return and Either as its closer to
+    // what we would derive automatically
+    // Yet I do not want to implement it again and I'm note sure if I'll need
+    // the old one so here's just a wrapper for now
+    pub(crate) fn dispatch_before(
+        &mut self, cx: &mut Context
+    ) -> Either<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool)), Result<(), Error>> {
+        let result_optn = self.dispatch_before_optn(cx);
+        match result_optn {
+            None => Either::Right(Ok(())),
+            Some(packet_tuple) => Either::Left(packet_tuple)
+        }
+    }
 
     #[cfg(feature = "ohua")]
     /// The original dispatch function returns Result<(), E>, whereby OK() is
@@ -2235,7 +2249,7 @@ impl<'a> OhuaTcpSocket<'a> {
     /// because of socket state or timeout
     /// This means None comming from this function should not throw an error downstream
     /// ie.e no ok_or
-    pub(crate) fn dispatch_before(
+    pub(crate) fn dispatch_before_optn(
         &mut self, cx: &mut Context
     ) -> Option<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
    {
@@ -2493,9 +2507,68 @@ impl<'a> OhuaTcpSocket<'a> {
         emit(cx, (ip_repr, repr))
     }
 
-// ToDo 
+    // This is literally just a copy of the second part of dispatch
+    // At least the return type was different in Sebastains version and I don't
+    // want to check manually if there's more differences from the original
+    // So here we go, another 'dispatch'
+    // Also it will have the
     #[cfg(feature = "ohua")]
-    pub(crate) fn dispatch_after(
+    pub(crate) fn dispatch_after<E>(
+        &mut self,
+        cx: &mut Context,
+        (repr,ip_repr, is_keep_alive): (TcpReprP,IpRepr ,bool)
+    ) -> Result<(), E>
+    { // We've sent something, whether useful data or a keep-alive packet, so rewind
+      // the keep-alive timer.
+        self.timer.rewind_keep_alive(cx.now(), self.keep_alive);
+
+        // Reset delayed-ack timer
+        match self.ack_delay_timer {
+            AckDelayTimer::Idle => {}
+            AckDelayTimer::Waiting(_) => {
+                tcp_trace!("stop delayed ack timer")
+            }
+            AckDelayTimer::Immediate => {
+                tcp_trace!("stop delayed ack timer (was force-expired)")
+            }
+        }
+        self.ack_delay_timer = AckDelayTimer::Idle;
+
+        // Leave the rest of the state intact if sending a keep-alive packet, since those
+        // carry a fake segment.
+        if is_keep_alive {
+            return Ok(());
+        }
+
+        // We've sent a packet successfully, so we can update the internal state now.
+        self.remote_last_seq = repr.seq_number + repr.segment_len();
+        self.remote_last_ack = repr.ack_number;
+        self.remote_last_win = repr.window_len;
+
+        if repr.segment_len() > 0 {
+            self.rtte
+                .on_send(cx.now(), repr.seq_number + repr.segment_len());
+        }
+
+        if !self.seq_to_transmit(cx) && repr.segment_len() > 0 {
+            // If we've transmitted all data we could (and there was something at all,
+            // data or flag, to transmit, not just an ACK), wind up the retransmit timer.
+            self.timer
+                .set_for_retransmit(cx.now(), self.rtte.retransmission_timeout());
+        }
+
+        if self.state == State::Closed {
+            // When aborting a connection, forget about it after sending a single RST packet.
+            self.tuple = None;
+        }
+
+        Ok(())
+    }
+
+
+
+    #[cfg(feature = "ohua")]
+    pub(crate) fn dispatch_after_unit(
         &mut self,
         cx: &mut Context,
         (repr, is_keep_alive): (TcpReprP, bool)
@@ -2550,6 +2623,8 @@ impl<'a> OhuaTcpSocket<'a> {
         // ToDo:: Original Code returned Ok here. Why don't we?!
     }
 
+
+
     #[allow(clippy::if_same_then_else)]
     pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
         // The logic here mirrors the beginning of dispatch() closely.
@@ -2595,7 +2670,7 @@ impl<'a> OhuaTcpSocket<'a> {
     pub(crate) fn dispatch_by_call(&mut self, cx: &mut Context, d: DispatchCall) -> DispatchResult {
         match d {
             DispatchCall::Pre(emit) => {
-                let packets_or_early = self.dispatch_before(cx);
+                let packets_or_early = self.dispatch_before_optn(cx);
                 match packets_or_early {
                     None => DispatchResult::Pre(Ok(None)),
                     Some((reprs, reprs_cpy))
@@ -2604,7 +2679,7 @@ impl<'a> OhuaTcpSocket<'a> {
             }
 
             DispatchCall::Post(tcp_repr, is_keep_alive) => {
-                self.dispatch_after(cx, (tcp_repr, is_keep_alive));
+                self.dispatch_after_unit(cx, (tcp_repr, is_keep_alive));
                 DispatchResult::Post
             }
         }

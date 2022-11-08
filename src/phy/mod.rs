@@ -340,6 +340,18 @@ pub trait Device<'a> {
                      |buffer| Ok(buffer.copy_from_slice(packet.as_slice()))));
         sending_result
     }
+
+    fn consume_token(
+        &'a mut self,
+        timestamp:Instant,
+        packet:Vec<u8>,
+        token:<Self as Device<'a>>::TxToken) -> Result<()> {
+        token.consume(timestamp, packet.len(),
+                  |buffer| {
+                      buffer.copy_from_slice(packet.as_slice());
+                      Ok(())
+                  })
+    }
 }
 
 /// A token to receive a single network packet.

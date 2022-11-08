@@ -23,7 +23,7 @@ use crate::socket::dns;
 use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
-use crate::{Error, Result};
+use crate::{Either, Error, Result};
 #[cfg(feature = "ohua")]
 use crate::socket::tcp_ohua::{DispatchCall, DispatchResult, OhuaTcpSocket};
 #[cfg(feature = "ohua")]
@@ -39,34 +39,40 @@ use crate::iface::interface::{IpPacket};
 /// We start with transformation relevant Code because I go nuts otherwise with this
 /// biblical-proportion modules
 
+
 // Reminder: I need to pass a lifetime here because the original poll derived it from the &self
 /*
-fn poll<'a, D>(timestamp:Instant, ip_stack: &'a mut OInterface<'a>,
-               device: &mut D, sockets: &mut SocketSet<'a>)-> Result<bool>
+fn poll_egress_only<'a, D>(timestamp:Instant, mut ip_stack: OInterface<'a>,
+                       mut device: D, mut sockets: SocketSet<'a>)
+    -> (Result<bool>, SocketSet<'a>, D)
   where D: for<'d> Device<'d>
 {
     ip_stack.inner_mut().now = timestamp;
     // .. we leave out the optional fragments stuff for now
-
+    let device_ref = &mut device;
+    let sockets_ref = &mut sockets;
     let mut readiness_may_have_changed = false;
     loop {
-        let processed_any = ip_stack.socket_ingress(device, sockets);
-        let emitted_any = ip_stack.socket_egress_ohua(device, sockets);
+        //let processed_any = ip_stack.socket_ingress(device, sockets);
+        let emitted_any = ip_stack.socket_egress_ohua(device_ref, sockets_ref);
 
         //#[cfg(feature = "proto-igmp")]
         //self.igmp_egress()?;
 
-        if processed_any || emitted_any {
+        if emitted_any {
             readiness_may_have_changed = true;
         } else {
             break;
         }
     }
 
-    Ok(readiness_may_have_changed)
-}
+    (Ok(readiness_may_have_changed), sockets, device)
+}*/
 
-*/
+// Question: We may infer the type of the device from the context. Should we try to eliminate
+//         generic types at this point?
+
+#[cfg(feature = "ohua")]
 macro_rules! check {
     ($e:expr) => {
         match $e {
@@ -86,7 +92,7 @@ macro_rules! check {
 // We use these macros to temporarily take the 'field' i.e. the inner interface 
 // from its owner (the interface) during function execution and put it back afterwards
 
-
+#[cfg(feature = "ohua")]
 macro_rules! let_field {
     ($self:ident.$field:ident, $($t:expr);+) => {
         match $self.$field.as_ref() {
@@ -106,6 +112,7 @@ macro_rules! let_field {
     };
 }
 
+#[cfg(feature = "ohua")]
 macro_rules! let_mut_field {
     ($self:ident.$field:ident, $t:expr) => {
         match $self.$field.as_mut() {
@@ -694,13 +701,11 @@ impl<'a> OInterface<'a> {
         )
     }
 
-    fn inner_mut(&mut self) -> &mut Context<'a> {
+    pub fn inner_mut(&mut self) -> &mut Context<'a> {
         let_mut_field!(self.inner,
             inner
         )
     }
-
-
 
     /// Get the IP addresses of the interface.
     pub fn ip_addrs(&self) -> &[IpCidr] {
@@ -824,9 +829,11 @@ impl<'a> OInterface<'a> {
         loop {
             let processed_any = self.socket_ingress(device, sockets);
             let emitted_any = self.socket_egress(device, sockets);
-
+		
+	    //ToDo: This is an adaptation to a newer version of smoltcp
+            //  just to reminde myself, that there is more device-stack convolution ahead
             //#[cfg(feature = "proto-igmp")]
-            //self.igmp_egress()?;
+            //self.igmp_egress(device)?;
 
             if processed_any || emitted_any {
                 readiness_may_have_changed = true;
@@ -963,15 +970,14 @@ impl<'a> OInterface<'a> {
         let mut emitted_any = false;
 
         for item in sockets.items_mut() {
-                if !item
-                    .meta
-                    .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
-                {
-                    continue;
-                }
+            if !item
+                .meta
+                .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
+            {
+                continue;
+            }
 
-              let mut neighbor_addr = None;
-                
+            let mut neighbor_addr = None;
 
               let mut respond = |inner: &mut Context, response: IpPacket| {
                     neighbor_addr = Some(response.ip_repr().dst_addr());
@@ -1119,7 +1125,7 @@ impl<'a> OInterface<'a> {
     #[cfg(feature = "ohua")]
     #[allow(dead_code)]
     // ToDo: Sockets wont live as long as the interface.
-    fn socket_egress_ohua<DeviceT>(&'a mut self, device: &mut DeviceT, sockets: &mut SocketSet<'a>) -> bool
+    fn socket_egress_ohua<DeviceT>(&mut self, device: &mut DeviceT, sockets: &mut SocketSet<'a>) -> bool
     where
         DeviceT: for<'d> Device<'d>,
     {
