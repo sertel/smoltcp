@@ -23,6 +23,7 @@ use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
+use crate::socket::tcp_ohua::OhuaTcpSocket;
 
 
 /// Reminder : I did it here, because the inner interface needs it and we don't have a
@@ -61,7 +62,7 @@ pub fn poll_4_egress_ask<'a, D>(
     -> ( Result<bool>, Interface<'a>, D, SocketSet<'static>)
     where D: for<'d> Device<'d>
 {
-    ip_stack.inner.now = timestamp;
+    ip_stack.set_inner_now(timestamp);
     // .. we leave out the optional fragments stuff for now
 
     let mut readiness_has_changed = false;
@@ -70,20 +71,19 @@ pub fn poll_4_egress_ask<'a, D>(
         let processed_any = false;//ip_stack.socket_ingress(device, sockets);
         // Begin of inlined ip_stack.socket_egress()
         // -> ip_stack.socket_egress(device, sockets);
-        let Interface{
+        /*let Interface{
             inner: mut inner,
             out_packets: _out_packets,
             ..
-        } = ip_stack;
+        } = ip_stack;*/
 
         let _caps = device.capabilities();
-        //let mut inner = inner_option.take().unwrap();
         let mut emitted_any = false;
 
         for item  in sockets.items_mut() {
             // check egress permission for socket
-            if !item.meta.egress_permitted( inner.now,
-                    |ip_addr| inner.has_neighbor(&ip_addr))
+            if !item.meta.egress_permitted( ip_stack.inner_now(),
+                    |ip_addr| ip_stack.inner_has_neighbor(&ip_addr))
             {
                 continue;
             }
@@ -91,19 +91,25 @@ pub fn poll_4_egress_ask<'a, D>(
 
             let mut result:Result<()>;
 
+            // ToDo: I should actually wrap the whole match,
+            //      but "name generation" will become less pretty
+            //      Also it's not clear, how we would derive wrapping
+            //      probably going through the arms, checking wich states are
+            //      involved
             let packet_or_ok = match &mut item.socket {
                 Socket::OhuaTcp(socket) =>
-                    socket.dispatch_before(&mut inner),
+                    //CAUTION: We use a reference here for now but this must
+                    // Not be permanent
+                    ip_stack.socket_dispatch_before(&mut socket),
                 _ => panic!("Only Ohua TCP sockets supported!"),
-            };//.dispatch_before();
+            };
             if is_packet(packet_or_ok) {
                 let (response_tpl, response_and_bool) = as_packet(packet_or_ok);
                 let response = IpPacket::Tcp(response_tpl);
                 neighbor_addr = Some(response.ip_repr().dst_addr());
                 let sending_token = device.transmit();
                 if sending_token.is_some() {
-                    let local_dispatch_result = inner
-                        .dispatch_local(response, None);
+                    let local_dispatch_result = ip_stack.inner_dispatch_local(response, None);
                     if let Ok((packet, timest)) = local_dispatch_result{
                         let send_result =
                             device.consume_token(timest, packet, sending_token.unwrap());
@@ -111,7 +117,7 @@ pub fn poll_4_egress_ask<'a, D>(
                             result = Ok(());
                             // will neither fail nor return early
                              match &mut item.socket {
-                                Socket::OhuaTcp(socket) => socket.dispatch_after::<Error>(&mut inner, response_and_bool),
+                                Socket::OhuaTcp(socket) => ip_stack.socket_dispatch_after::<Error>(&mut socket, response_and_bool),
                                 _ => panic!("Only Ohua TCP sockets supported!"),
                             };//item.socket.dispatch_after(response);
                             emitted_any = true;
@@ -132,30 +138,12 @@ pub fn poll_4_egress_ask<'a, D>(
                 result = Ok(());
             }
 
-            match result {
-                Err(Error::Exhausted) => break, // Device buffer full.
-                Err(Error::Unaddressable) => {
-                    // `NeighborCache` already takes care of rate limiting the neighbor discovery
-                    // requests from the socket. However, without an additional rate limiting
-                    // mechanism, we would spin on every socket that has yet to discover its
-                    // neighbor.
-                    item.meta.neighbor_missing(
-                        inner.now,
-                        neighbor_addr.expect("non-IP response packet"),
-                    );
-                    break;
+            let maybe_break = ip_stack.handle_result(result, item);
+            if maybe_break {
+                break
                 }
-                Err(err) => {
-                    net_debug!(
-                        "{}: cannot dispatch egress packet: {}",
-                        item.meta.handle,
-                        err
-                    );
-                }
-                Ok(()) => {}
             }
             // End of inlined ip_stack.socket_egress()
-        }
 
         if processed_any || emitted_any {
             readiness_has_changed = true;
@@ -866,6 +854,70 @@ pub(crate) enum IgmpReportState {
 }
 
 impl<'a> Interface<'a> {
+    //Starting here functions are wrappers
+    // created during 'transormation''
+    fn set_inner_now(&mut self, timestamp:Instant) {
+        self.inner.now = timestamp;
+    }
+    fn inner_now(&mut self) -> Instant {
+        self.inner.now
+    }
+
+    fn inner_has_neighbor(&self, ipaddr:&IpAddress) -> bool {
+        self.inner.has_neighbor(ipaddr)
+    }
+
+    //ToDo: the socket matching goes here so argument becomes :&mutSocket again
+    fn socket_dispatch_before(&mut self, mut socket:&mut OhuaTcpSocket)-> Either<PacketTwice, Result<()>> {
+        socket.dispatch_before(&mut self.inner)
+    }
+
+    fn inner_dispatch_local(&mut self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
+    ) -> Result<(Vec<u8>, Instant)> {
+        self.inner.dispatch_local(reponse, out_packets)
+    }
+
+    //ToDo: the socket matching goes here so argument becomes :&mutSocket again
+    fn socket_dispatch_after(&mut self, mut socket:&mut OhuaTcpSocket,response_and_bool:(IpPacket, bool)) {
+        socket.dispatch_after(self.context(), response_and_bool)
+    }
+
+    //ToDo: an item of iterating a socket set is this tuple type,
+    //  but check if we can (autmatically) derive to use only the socket
+    //
+    fn handle_result(&mut self, result:Result<()>, item:(SocketHandle, &mut Socket<'a>)) -> bool
+    {
+        // This is a little clumbbsy but I think automatic wrapping of
+        // matches should assign the arms to something and return that
+        // not sure how we would derive in this case
+
+        let should_break;
+        match result {
+            Err(Error::Exhausted) => should_break=true, // Device buffer full.
+            Err(Error::Unaddressable) => {
+                // `NeighborCache` already takes care of rate limiting the neighbor discovery
+                // requests from the socket. However, without an additional rate limiting
+                // mechanism, we would spin on every socket that has yet to discover its
+                // neighbor.
+                item.meta.neighbor_missing(
+                    inner.now,
+                    neighbor_addr.expect("non-IP response packet"),
+                );
+                should_break=true;
+            }
+            Err(err) => {
+                net_debug!(
+                    "{}: cannot dispatch egress packet: {}",
+                    item.meta.handle,
+                    err
+                );
+                should_break = false;
+            }
+            Ok(()) => should_break=false,
+        }
+        should_break
+    }
+    // this is the end of inserted wrapper functions
     /// Get the socket context.
     ///
     /// The context is needed for some socket methods.
