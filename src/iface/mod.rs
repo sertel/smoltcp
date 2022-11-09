@@ -27,5 +27,5 @@ pub use socket_set::{SocketHandle, SocketSet, SocketStorage};
 pub use self::fragmentation::{PacketAssembler, PacketAssemblerSet as FragmentsCache};
 
 pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context
-, poll_4_egress_ask};
+                          , poll_6_egress_ask};
 pub use self::interface_ohua::{OInterface, OInterfaceBuilder};

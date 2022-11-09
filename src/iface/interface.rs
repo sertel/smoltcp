@@ -9,7 +9,7 @@ use managed::{ManagedMap, ManagedSlice};
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 use super::fragmentation::PacketAssemblerSet;
-use super::socket_set::SocketSet;
+use super::socket_set::{SocketSet, Item};
 use crate::iface::Routes;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use crate::iface::{NeighborAnswer, NeighborCache};
@@ -24,6 +24,7 @@ use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
 use crate::socket::tcp_ohua::OhuaTcpSocket;
+use crate::wire::ip::{Address, Repr};
 
 
 /// Reminder : I did it here, because the inner interface needs it and we don't have a
@@ -54,7 +55,7 @@ impl LocalTxToken {
 
 // Version `poll_4_egress_ask`
 
-pub fn poll_4_egress_ask<'a, D>(
+pub fn poll_6_egress_ask<'a, D>(
     timestamp: Instant,
     mut ip_stack: Interface<'a>,
     mut device: D,
@@ -89,7 +90,7 @@ pub fn poll_4_egress_ask<'a, D>(
             }
             let mut neighbor_addr = None;
 
-            let mut result:Result<()>;
+            let result:Result<()>;
 
             // ToDo: I should actually wrap the whole match,
             //      but "name generation" will become less pretty
@@ -100,10 +101,10 @@ pub fn poll_4_egress_ask<'a, D>(
                 Socket::OhuaTcp(socket) =>
                     //CAUTION: We use a reference here for now but this must
                     // Not be permanent
-                    ip_stack.socket_dispatch_before(&mut socket),
+                    ip_stack.socket_dispatch_before(socket),
                 _ => panic!("Only Ohua TCP sockets supported!"),
             };
-            if is_packet(packet_or_ok) {
+            if is_packet(&packet_or_ok) {
                 let (response_tpl, response_and_bool) = as_packet(packet_or_ok);
                 let response = IpPacket::Tcp(response_tpl);
                 neighbor_addr = Some(response.ip_repr().dst_addr());
@@ -114,10 +115,14 @@ pub fn poll_4_egress_ask<'a, D>(
                         let send_result =
                             device.consume_token(timest, packet, sending_token.unwrap());
                         if send_result.is_ok() {
-                            result = Ok(());
-                            // will neither fail nor return early
-                             match &mut item.socket {
-                                Socket::OhuaTcp(socket) => ip_stack.socket_dispatch_after::<Error>(&mut socket, response_and_bool),
+                            // As dispatch_after is normally part of the path
+                            // that leads to 'result', automatic transformation would
+                            // assign the result to the return of it->
+                            // that means, that the compiler figured out,
+                            // what socket.dispatch can return.
+                            result = match &mut item.socket {
+                                Socket::OhuaTcp(socket) =>
+                                    ip_stack.socket_dispatch_after(socket, response_and_bool),
                                 _ => panic!("Only Ohua TCP sockets supported!"),
                             };//item.socket.dispatch_after(response);
                             emitted_any = true;
@@ -138,7 +143,7 @@ pub fn poll_4_egress_ask<'a, D>(
                 result = Ok(());
             }
 
-            let maybe_break = ip_stack.handle_result(result, item);
+            let maybe_break = ip_stack.handle_result(result, item, neighbor_addr);
             if maybe_break {
                 break
                 }
@@ -158,7 +163,7 @@ pub fn poll_4_egress_ask<'a, D>(
 //  downstream where it's needed
 type PacketTwice<'a> = ((IpRepr, TcpRepr<'a>), (TcpReprP, IpRepr, bool));
 
-fn is_packet(maybe_packet:Either<PacketTwice, Result<()>>)
+fn is_packet(maybe_packet:&Either<PacketTwice, Result<()>>)
              -> bool {
     match maybe_packet {
         Either::Left(_) => false,
@@ -868,7 +873,9 @@ impl<'a> Interface<'a> {
     }
 
     //ToDo: the socket matching goes here so argument becomes :&mutSocket again
-    fn socket_dispatch_before(&mut self, mut socket:&mut OhuaTcpSocket)-> Either<PacketTwice, Result<()>> {
+    //ToDo: figure out a) if we need to derive lt annotations and b) How
+    fn socket_dispatch_before(&mut self, socket:&mut OhuaTcpSocket)
+        -> Either<PacketTwice, Result<()>> {
         socket.dispatch_before(&mut self.inner)
     }
 
@@ -878,14 +885,18 @@ impl<'a> Interface<'a> {
     }
 
     //ToDo: the socket matching goes here so argument becomes :&mutSocket again
-    fn socket_dispatch_after(&mut self, mut socket:&mut OhuaTcpSocket,response_and_bool:(IpPacket, bool)) {
+    fn socket_dispatch_after(
+        &mut self,
+        socket:&mut OhuaTcpSocket,
+        response_and_bool:(TcpReprP, IpRepr, bool)) -> Result<()> {
         socket.dispatch_after(self.context(), response_and_bool)
     }
 
     //ToDo: an item of iterating a socket set is this tuple type,
     //  but check if we can (autmatically) derive to use only the socket
     //
-    fn handle_result(&mut self, result:Result<()>, item:(SocketHandle, &mut Socket<'a>)) -> bool
+    fn handle_result(&mut self, result:Result<()>,
+                     item: &mut Item, neighbor_addr: Option<Address>) -> bool
     {
         // This is a little clumbbsy but I think automatic wrapping of
         // matches should assign the arms to something and return that
@@ -900,7 +911,7 @@ impl<'a> Interface<'a> {
                 // mechanism, we would spin on every socket that has yet to discover its
                 // neighbor.
                 item.meta.neighbor_missing(
-                    inner.now,
+                    self.inner.now,
                     neighbor_addr.expect("non-IP response packet"),
                 );
                 should_break=true;
