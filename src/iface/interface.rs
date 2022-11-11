@@ -23,8 +23,7 @@ use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
-use crate::socket::tcp_ohua::OhuaTcpSocket;
-use crate::wire::ip::{Address, Repr};
+use crate::wire::ip::{Address};
 
 
 /// Reminder : I did it here, because the inner interface needs it and we don't have a
@@ -52,10 +51,9 @@ impl LocalTxToken {
         buffer
     }
 }
+// Current Version of poll transformation
 
-// Version `poll_4_egress_ask`
-
-pub fn poll_6_egress_ask<'a, D>(
+pub fn poll_7_egress_ask<'a, D>(
     timestamp: Instant,
     mut ip_stack: Interface<'a>,
     mut device: D,
@@ -63,6 +61,7 @@ pub fn poll_6_egress_ask<'a, D>(
     -> ( Result<bool>, Interface<'a>, D, SocketSet<'static>)
     where D: for<'d> Device<'d>
 {
+    /*
     ip_stack.set_inner_now(timestamp);
     // .. we leave out the optional fragments stuff for now
 
@@ -72,80 +71,51 @@ pub fn poll_6_egress_ask<'a, D>(
         let processed_any = false;//ip_stack.socket_ingress(device, sockets);
         // Begin of inlined ip_stack.socket_egress()
         // -> ip_stack.socket_egress(device, sockets);
-        /*let Interface{
-            inner: mut inner,
-            out_packets: _out_packets,
-            ..
-        } = ip_stack;*/
 
-        let _caps = device.capabilities();
+        // this was neither used, nor did it modify the device
+        // let _caps = device.capabilities();
         let mut emitted_any = false;
 
         for item  in sockets.items_mut() {
             // check egress permission for socket
-            if !item.meta.egress_permitted( ip_stack.inner_now(),
-                    |ip_addr| ip_stack.inner_has_neighbor(&ip_addr))
+            if ip_stack.item_meta_egress_permitted(item)
             {
-                continue;
-            }
-            let mut neighbor_addr = None;
-
-            let result:Result<()>;
-
-            // ToDo: I should actually wrap the whole match,
-            //      but "name generation" will become less pretty
-            //      Also it's not clear, how we would derive wrapping
-            //      probably going through the arms, checking wich states are
-            //      involved
-            let packet_or_ok = match &mut item.socket {
-                Socket::OhuaTcp(socket) =>
-                    //CAUTION: We use a reference here for now but this must
-                    // Not be permanent
-                    ip_stack.socket_dispatch_before(socket),
-                _ => panic!("Only Ohua TCP sockets supported!"),
-            };
-            if is_packet(&packet_or_ok) {
-                let (response_tpl, response_and_bool) = as_packet(packet_or_ok);
-                let response = IpPacket::Tcp(response_tpl);
-                neighbor_addr = Some(response.ip_repr().dst_addr());
-                let sending_token = device.transmit();
-                if sending_token.is_some() {
-                    let local_dispatch_result = ip_stack.inner_dispatch_local(response, None);
-                    if let Ok((packet, timest)) = local_dispatch_result{
-                        let send_result =
-                            device.consume_token(timest, packet, sending_token.unwrap());
-                        if send_result.is_ok() {
-                            // As dispatch_after is normally part of the path
-                            // that leads to 'result', automatic transformation would
-                            // assign the result to the return of it->
-                            // that means, that the compiler figured out,
-                            // what socket.dispatch can return.
-                            result = match &mut item.socket {
-                                Socket::OhuaTcp(socket) =>
-                                    ip_stack.socket_dispatch_after(socket, response_and_bool),
-                                _ => panic!("Only Ohua TCP sockets supported!"),
-                            };//item.socket.dispatch_after(response);
-                            emitted_any = true;
+                let mut neighbor_addr = None;
+                let result:Result<()>;
+                let packet_or_ok =
+                    ip_stack.match_socket_dispatch_before(item);
+                if is_packet(&packet_or_ok) {
+                    let (response, response_and_keepalive) =
+                        from_packet(packet_or_ok);
+                    neighbor_addr = as_optn_addr(&response);
+                    let sending_token = device.transmit();
+                    if sending_token.is_some() {
+                        let local_dispatch_result = ip_stack.inner_dispatch_local(response, None);
+         // --------------------------------------------------------------------------------------------------------------
+                        if let Ok((packet, timest)) = local_dispatch_result{
+                            let send_result =
+                                device.consume_token(timest, packet, sending_token.unwrap());
+                            if send_result.is_ok() {
+                                result = ip_stack.match_socket_dispatch_after(item, response_and_keepalive);//item.socket.dispatch_after(response);
+                                emitted_any = true;
+                            } else {
+                                result = send_result
+                            }
                         } else {
-                            result = send_result
+                            result = Err(local_dispatch_result.unwrap_err());
                         }
                     } else {
-                        // We get different kinds of Result<Something,E> and
-                        // Rust doesn't know, that in the else branch only the
-                        // E is relevant, so we need to wrap that
-                        result = Err(local_dispatch_result.unwrap_err());
+                        net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                        result = Err(Error::Exhausted);
                     }
                 } else {
-                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                    result = Err(Error::Exhausted);
+                    result = Ok(());
                 }
-            } else {
-                result = Ok(());
-            }
 
-            let maybe_break = ip_stack.handle_result(result, item, neighbor_addr);
-            if maybe_break {
-                break
+                let maybe_break = ip_stack.handle_result(result, item, neighbor_addr);
+                if maybe_break {
+                    break
+                    }
                 }
             }
             // End of inlined ip_stack.socket_egress()
@@ -157,6 +127,9 @@ pub fn poll_6_egress_ask<'a, D>(
         }
     }
     (Ok(readiness_has_changed), ip_stack, device, sockets)
+
+     */
+    (Ok(false), ip_stack, device, sockets)
 }
 // ToDo: ReprP is just a conversion from Repr made in
 //  dispatch_before_optn -> check if that makes sense or should be moved
@@ -174,6 +147,18 @@ fn is_packet(maybe_packet:&Either<PacketTwice, Result<()>>)
 fn as_packet(maybe_packet:Either<PacketTwice, Result<()>>)
     -> PacketTwice {
     maybe_packet.left_or_panic()
+}
+
+fn from_packet(
+    maybe_packet: Either<PacketTwice, Result<()>>)
+    -> (IpPacket, (TcpReprP, IpRepr, bool)) {
+    let (response_tpl, response_and_bool) = as_packet(maybe_packet);
+    let response = IpPacket::Tcp(response_tpl);
+    (response, response_and_bool)
+}
+
+fn as_optn_addr(packet: &IpPacket) -> Option<Address>{
+    Some(packet.ip_repr().dst_addr())
 }
 
 
@@ -874,9 +859,14 @@ impl<'a> Interface<'a> {
 
     //ToDo: the socket matching goes here so argument becomes :&mutSocket again
     //ToDo: figure out a) if we need to derive lt annotations and b) How
-    fn socket_dispatch_before(&mut self, socket:&mut OhuaTcpSocket)
+    fn match_socket_dispatch_before<'s>(&'s mut self, item:&'s mut Item)
         -> Either<PacketTwice, Result<()>> {
-        socket.dispatch_before(&mut self.inner)
+        match &mut item.socket {
+                    Socket::OhuaTcp(socket) =>
+                        socket.dispatch_before(&mut self.inner),
+                    _ => panic!("Only Ohua TCP sockets supported!"),
+                }
+
     }
 
     fn inner_dispatch_local(&mut self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
@@ -885,11 +875,16 @@ impl<'a> Interface<'a> {
     }
 
     //ToDo: the socket matching goes here so argument becomes :&mutSocket again
-    fn socket_dispatch_after(
+    fn match_socket_dispatch_after(
         &mut self,
-        socket:&mut OhuaTcpSocket,
+        item:&mut Item,
         response_and_bool:(TcpReprP, IpRepr, bool)) -> Result<()> {
-        socket.dispatch_after(self.context(), response_and_bool)
+        match &mut item.socket {
+            Socket::OhuaTcp(socket) =>
+                socket.dispatch_after(self.context(), response_and_bool),
+            _ => panic!("Only Ohua TCP sockets supported!"),
+        }
+
     }
 
     //ToDo: an item of iterating a socket set is this tuple type,
@@ -928,6 +923,13 @@ impl<'a> Interface<'a> {
         }
         should_break
     }
+
+    fn item_meta_egress_permitted(&self, item: &mut Item) -> bool {
+        item.meta.egress_permitted(
+            self.inner.now,
+            |ip_addr| self.inner.has_neighbor(&ip_addr))
+    }
+
     // this is the end of inserted wrapper functions
     /// Get the socket context.
     ///
@@ -1107,6 +1109,85 @@ impl<'a> Interface<'a> {
         &mut self.inner.routes
     }
 
+    /// If we refactor the inner loop of an algo to a recursion  we do not
+    /// want to refactor the algo as such, because then we would need to find all
+    /// its call sides to change the arguments to that call and we would
+    /// need condtional execution of the non-lopping parts
+    /// So we create an a recusive function jsut from the loop part.
+    pub fn simple_poll_outer<D>(
+        &mut self,
+        timestamp: Instant,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+    ) -> Result<bool>
+    where
+        D: for<'d> Device<'d>,
+    {
+        self.inner.now = timestamp;
+
+        //This is actually not correctly wrapped as it
+        //can early return from poll and as we need to change
+        // its possibel return types (currently Ok/Err/())
+        //self.early_return_fragment_stuff(timestamp, device);
+
+        let mut readiness_may_have_changed =
+            self.simpl_poll_inner(device, sockets,false);
+
+        Ok(readiness_may_have_changed)
+    }
+
+    fn simpl_poll_inner<D>(&mut self, device: &mut D, sockets: &mut SocketSet, readiness_may_have_changed: bool ) -> bool
+        where
+        D: for<'d> Device<'d>,
+    {
+
+        let processed_any = self.socket_ingress(device, sockets);
+        let emitted_any = self.socket_egress(device, sockets);
+
+        // Also leave this out for now
+        //#[cfg(feature = "proto-igmp")]
+        //self.igmp_egress(device)?;
+
+        if processed_any || emitted_any {
+            self.simpl_poll_inner(device, sockets, true)
+        } else {
+            readiness_may_have_changed
+        }
+
+    }
+
+
+    fn early_return_fragment_stuff<D>(&mut self, timestamp: Instant, device: &mut D)
+    where
+        D: for<'d> Device<'d>,
+    {
+        /*
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .ipv4_fragments
+            .remove_when(|frag| Ok(timestamp >= frag
+                .expires_at()?)) {
+            return Err(e);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .sixlowpan_fragments
+            .remove_when(|frag| Ok(timestamp >= frag
+                .expires_at()?)) {
+            return Err(e);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        match self.sixlowpan_egress(device) {
+            Ok(true) => return Ok(true),
+            Err(e) => return Err(e),
+            _ => (),
+        }*/
+    }
+
     /// Transmit packets queued in the given sockets, and receive packets queued
     /// in the device.
     ///
@@ -1124,7 +1205,7 @@ impl<'a> Interface<'a> {
     /// packets containing any unsupported protocol, option, or form, which is
     /// a very common occurrence and on a production system it should not even
     /// be logged.
-    pub fn poll<D>(
+        pub fn poll<D>(
         &mut self,
         timestamp: Instant,
         device: &mut D,
@@ -1178,7 +1259,6 @@ impl<'a> Interface<'a> {
 
         Ok(readiness_may_have_changed)
     }
-
     /// Return a _soft deadline_ for calling [poll] the next time.
     /// The [Instant] returned is the time at which you should call [poll] next.
     /// It is harmless (but wastes energy) to call it before the [Instant], and
@@ -1293,7 +1373,7 @@ impl<'a> Interface<'a> {
             ..
         } = self;
         let _caps = device.capabilities();
-
+        net_debug!("Socket Egress");
         let mut emitted_any = false;
         for item in sockets.items_mut() {
             if !item
@@ -1363,7 +1443,11 @@ impl<'a> Interface<'a> {
                 Socket::Dns(ref mut socket) => socket.dispatch(inner, |inner, response| {
                     respond(inner, IpPacket::Udp(response))
                 }),
-                _ => panic!("Don't mix normal interface with Ohua sockets")
+                #[cfg(feature = "ohua")]
+                Socket::OhuaTcp(ref mut socket) => socket.dispatch(inner, |inner, response| {
+                    respond(inner, IpPacket::Tcp(response))
+                }),
+                _ => panic!("Don't mix normal interface with Ohua raw sockets")
             };
 
             match result {
@@ -3618,6 +3702,7 @@ impl<'a> InterfaceInner<'a> {
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
+
     #[cfg(feature = "proto-igmp")]
     use std::vec::Vec;
 
@@ -4968,17 +5053,18 @@ mod test {
 
    #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_tcp_socket_egress() {
+    fn test_ohua_socket_egress() {
         use crate::socket::tcp::test::{
             socket_established_with_endpoints, TestSocket};
         use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
-
+        use crate::iface::mock;
+        use crate::socket::tcp_ohua::test::{
+            ohua_socket_established_with_endpoints, OhuaTestSocket};
         //smoltcp
         let (mut iface1, mut sockets1, mut device1) = create();
 
         let TestSocket{socket, cx} = socket_established_with_endpoints(
-                // I could not enforce proto-ipv4
-                IpEndpoint{
+            IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                     port: 80
                 },
@@ -5019,14 +5105,12 @@ mod test {
         assert_eq!(1, device1.num_tx_packets());
 
 
-        // OHUA: As we now have the changes only in interface_ohua,
-       // there's nothing to compare here any more
-        /*
+        // OHUA: Version
+
         net_debug!("Now the same procedure for socket_egress_tcp");
-        let (mut iface2, mut sockets2, device2) = create();
-        let TestSocket{socket, cx} =
-            socket_established_with_endpoints(
-                // I could not enforce proto-ipv4
+        let (mut iface2, mut sockets2, mut device2) = mock();
+        let OhuaTestSocket{socket, cx} =
+            ohua_socket_established_with_endpoints(
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                     port: 80
@@ -5035,13 +5119,13 @@ mod test {
                     addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
                     port: 49500} );
 
-        iface2.inner = Some(cx);
+
         // Devices sending buffer should again be empty
-        assert!(device1.empty_tx());
+        assert!(device2.empty_tx());
 
         let tcp_socket_handle2 = sockets2.add(socket);
 
-        let socket2 = sockets2.get_mut::<tcp::Socket>(tcp_socket_handle2);
+        let socket2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle2);
         assert!(!socket2.can_recv());
         assert!(socket2.may_send());
         assert!(socket2.can_send());
@@ -5052,50 +5136,76 @@ mod test {
         let result_len = socket2.send_slice(msg);
         assert_eq!(result_len, Ok(msg_len));
         net_debug!("running egress with ohua version");
-        assert_eq!(iface2.socket_egress_tcp(), Ok(true));
-
+        assert_eq!(iface2.socket_egress(&mut device2, &mut sockets2), true);
         // Again make sure the data arrived at the device level:
         // Devices sending buffer should contain our packet
-        assert_eq!(1, device1.num_tx_packets());
+        assert_eq!(1, device2.num_tx_packets());
         net_debug!("one packet in the buffer :-)");
 
        // TODO compare the states of both sockets
        let s1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1).state();
-       let s2 = sockets2.get_mut::<tcp::Socket>(tcp_socket_handle2).state();
+       let s2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle2).state();
        assert_eq!(s1, s2);
 
-
-        // As it is a loopback we should also be able to receive from it
-        iface1.socket_ingress(device1, sockets1);
-       */
     }
 
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_tcp_socket_ingress() {
-        /*let TestSocket{socket, cx} = socket_established_with_endpoints(
-                // local
-                IpEndpoint{
+    fn test_ohua_simple_poll(){
+        use crate::socket::tcp_ohua::test::{
+            ohua_socket_established_with_endpoints, OhuaTestSocket};
+        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
+
+
+        // Just check that the current version of poll rewrite works
+        // We use the normal interface here
+        let (mut iface, mut sockets, mut device) = create();
+
+        // we take an Ohua socket cause we want to use dispatch_before later
+        let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
+                                IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                     port: 80
                 },
-                // remote
                 IpEndpoint {
                     addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
                     port: 49500} );
-        let mock_context = InterfaceInner::mock();
-        // assert_eq!(mock_context, mock_context);
-        // TODO: The igmp test uses ingress and puts the packet directly into the device before
-        // do this.*/
-        assert!(true);
-    }
-    #[test]
-    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_tcp_loop() {
-        // TODO: Rebuild the loopback example, just in case we're not testing examples all the
-        // time and mess something up
-    }
 
+        let tcp_socket_handle1 = sockets.add(socket);
+
+        let socket1 = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle1);
+        let msg = "hello".as_bytes();
+        let msg_len = msg.len();
+        let result_len = socket1.send_slice(msg);
+        assert_eq!(result_len, Ok(msg_len));
+        let timestamp = Instant::now();
+        // There is egress when there should be
+        let something_happend =
+            iface.simple_poll_outer(timestamp, &mut device, &mut sockets);
+        assert_eq!(something_happend, Ok(true));
+        //Reminder: We expect no packets in the device, because we called
+        //          ingress on a loopback so the message will be gone again
+        assert_eq!(0, device.num_tx_packets());
+
+        //This time without packets -> polling should return Ok(false)
+        let (mut iface1, mut sockets, mut device) = create();
+                let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
+                                IpEndpoint{
+                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                    port: 80
+                },
+                IpEndpoint {
+                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                    port: 49500} );
+
+        let tcp_socket_handle = sockets.add(socket);
+        // we add a socket but no message
+        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let nothing_happended = iface1
+            .simple_poll_outer( timestamp, &mut device, &mut sockets);
+        assert_eq!(nothing_happended, Ok(false));
+        assert_eq!(0, device.num_tx_packets());
+    }
 
 
 }

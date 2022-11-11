@@ -12,6 +12,7 @@ use crate::{Either, Error};
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::socket::{Context, PollAt};
+use crate::socket::tcp::State;
 use crate::storage::{Assembler, RingBuffer};
 use crate::time::{Duration, Instant};
 use crate::wire::{
@@ -60,43 +61,6 @@ pub enum RecvError {
 
 /// A TCP socket ring buffer.
 pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
-
-/// The state of a TCP socket, according to [RFC 793].
-///
-/// [RFC 793]: https://tools.ietf.org/html/rfc793
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum State {
-    Closed,
-    Listen,
-    SynSent,
-    SynReceived,
-    Established,
-    FinWait1,
-    FinWait2,
-    CloseWait,
-    Closing,
-    LastAck,
-    TimeWait,
-}
-
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            State::Closed => write!(f, "CLOSED"),
-            State::Listen => write!(f, "LISTEN"),
-            State::SynSent => write!(f, "SYN-SENT"),
-            State::SynReceived => write!(f, "SYN-RECEIVED"),
-            State::Established => write!(f, "ESTABLISHED"),
-            State::FinWait1 => write!(f, "FIN-WAIT-1"),
-            State::FinWait2 => write!(f, "FIN-WAIT-2"),
-            State::CloseWait => write!(f, "CLOSE-WAIT"),
-            State::Closing => write!(f, "CLOSING"),
-            State::LastAck => write!(f, "LAST-ACK"),
-            State::TimeWait => write!(f, "TIME-WAIT"),
-        }
-    }
-}
 
 // Conservative initial RTT estimate.
 const RTTE_INITIAL_RTT: u32 = 300;
@@ -2838,26 +2802,26 @@ pub(crate) mod test {
     // Helper functions
     // =========================================================================================//
 
-    pub(crate) struct TestSocket {
+    pub(crate) struct OhuaTestSocket {
         pub(crate) socket: OhuaTcpSocket<'static>,
         pub(crate) cx: Context<'static>,
     }
 
-    impl Deref for TestSocket {
+    impl Deref for OhuaTestSocket {
         type Target = OhuaTcpSocket<'static>;
         fn deref(&self) -> &Self::Target {
             &self.socket
         }
     }
 
-    impl DerefMut for TestSocket {
+    impl DerefMut for OhuaTestSocket {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.socket
         }
     }
 
     fn send(
-        socket: &mut TestSocket,
+        socket: &mut OhuaTestSocket,
         timestamp: Instant,
         repr: &TcpRepr,
     ) -> Option<TcpRepr<'static>> {
@@ -2883,7 +2847,7 @@ pub(crate) mod test {
         }
     }
 
-    fn recv<F>(socket: &mut TestSocket, timestamp: Instant, mut f: F)
+    fn recv<F>(socket: &mut OhuaTestSocket, timestamp: Instant, mut f: F)
     where
         F: FnMut(Result<TcpRepr, Error>),
     {
@@ -2908,7 +2872,7 @@ pub(crate) mod test {
         }
     }
 
-    fn recv_nothing(socket: &mut TestSocket, timestamp: Instant) {
+    fn recv_nothing(socket: &mut OhuaTestSocket, timestamp: Instant) {
         socket.cx.set_now(timestamp);
 
         let result: Result<(), ()> = socket
@@ -2971,20 +2935,20 @@ pub(crate) mod test {
         }};
     }
 
-    fn socket() -> TestSocket {
+    fn socket() -> OhuaTestSocket {
         socket_with_buffer_sizes(64, 64)
     }
 
-    fn socket_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+    fn socket_with_buffer_sizes(tx_len: usize, rx_len: usize) -> OhuaTestSocket {
         let rx_buffer = SocketBuffer::new(vec![0; rx_len]);
         let tx_buffer = SocketBuffer::new(vec![0; tx_len]);
         let mut socket = OhuaTcpSocket::new(rx_buffer, tx_buffer);
         socket.set_ack_delay(None);
         let cx = Context::mock();
-        TestSocket { socket, cx }
+        OhuaTestSocket { socket, cx }
     }
 
-    fn socket_syn_received_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+    fn socket_syn_received_with_buffer_sizes(tx_len: usize, rx_len: usize) -> OhuaTestSocket {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
         s.state = State::SynReceived;
         s.tuple = Some(TUPLE);
@@ -2995,11 +2959,11 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_syn_received() -> TestSocket {
+    fn socket_syn_received() -> OhuaTestSocket {
         socket_syn_received_with_buffer_sizes(64, 64)
     }
 
-    fn socket_syn_sent_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+    fn socket_syn_sent_with_buffer_sizes(tx_len: usize, rx_len: usize) -> OhuaTestSocket {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
         s.state = State::SynSent;
         s.tuple = Some(TUPLE);
@@ -3008,13 +2972,13 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_syn_sent() -> TestSocket {
+    fn socket_syn_sent() -> OhuaTestSocket {
         socket_syn_sent_with_buffer_sizes(64, 64)
     }
 
 /*
 // ToDo: refactor usage of endpoint to tuple
-    fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> TestSocket {
+    fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> OhuaTestSocket {
         let mut s = socket();
         s.state = State::SynSent;
         s.local_endpoint = local;
@@ -3024,7 +2988,7 @@ pub(crate) mod test {
         s
     }
  */
-    fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
+    fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> OhuaTestSocket {
         let mut s = socket_syn_received_with_buffer_sizes(tx_len, rx_len);
         s.state = State::Established;
         s.local_seq_no = LOCAL_SEQ + 1;
@@ -3034,23 +2998,23 @@ pub(crate) mod test {
         s
     }
 
-    pub(crate) fn socket_established() -> TestSocket {
+    pub(crate) fn socket_established() -> OhuaTestSocket {
         socket_established_with_buffer_sizes(64, 64)
     }
 
-    pub(crate) fn socket_established_with_endpoints(local:IpEndpoint, remote:IpEndpoint) -> TestSocket {
+    pub(crate) fn ohua_socket_established_with_endpoints(local:IpEndpoint, remote:IpEndpoint) -> OhuaTestSocket {
         let mut s = socket_established_with_buffer_sizes(64, 64);
         s.tuple = Some(Tuple{local, remote});
         s
     }
 
-    fn socket_fin_wait_1() -> TestSocket {
+    fn socket_fin_wait_1() -> OhuaTestSocket {
         let mut s = socket_established();
         s.state = State::FinWait1;
         s
     }
 
-    fn socket_fin_wait_2() -> TestSocket {
+    fn socket_fin_wait_2() -> OhuaTestSocket {
         let mut s = socket_fin_wait_1();
         s.state = State::FinWait2;
         s.local_seq_no = LOCAL_SEQ + 1 + 1;
@@ -3058,7 +3022,7 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_closing() -> TestSocket {
+    fn socket_closing() -> OhuaTestSocket {
         let mut s = socket_fin_wait_1();
         s.state = State::Closing;
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
@@ -3066,7 +3030,7 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_time_wait(from_closing: bool) -> TestSocket {
+    fn socket_time_wait(from_closing: bool) -> OhuaTestSocket {
         let mut s = socket_fin_wait_2();
         s.state = State::TimeWait;
         s.remote_seq_no = REMOTE_SEQ + 1 + 1;
@@ -3079,7 +3043,7 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_close_wait() -> TestSocket {
+    fn socket_close_wait() -> OhuaTestSocket {
         let mut s = socket_established();
         s.state = State::CloseWait;
         s.remote_seq_no = REMOTE_SEQ + 1 + 1;
@@ -3087,13 +3051,13 @@ pub(crate) mod test {
         s
     }
 
-    fn socket_last_ack() -> TestSocket {
+    fn socket_last_ack() -> OhuaTestSocket {
         let mut s = socket_close_wait();
         s.state = State::LastAck;
         s
     }
 
-    fn socket_recved() -> TestSocket {
+    fn socket_recved() -> OhuaTestSocket {
         let mut s = socket_established();
         send!(
             s,
@@ -3154,7 +3118,7 @@ pub(crate) mod test {
     // =========================================================================================//
     // Tests for the LISTEN state.
     // =========================================================================================//
-    fn socket_listen() -> TestSocket {
+    fn socket_listen() -> OhuaTestSocket {
         let mut s = socket();
         s.state = State::Listen;
         s.listen_endpoint = LISTEN_END;
@@ -4030,7 +3994,7 @@ pub(crate) mod test {
         assert_eq!(s.rx_buffer.dequeue_many(6), &b"abcdef"[..]);
     }
 
-    fn setup_rfc2018_cases() -> (TestSocket, Vec<u8>) {
+    fn setup_rfc2018_cases() -> (OhuaTestSocket, Vec<u8>) {
         // This is a utility function used by the tests for RFC 2018 cases. It configures a socket
         // in a particular way suitable for those cases.
         //

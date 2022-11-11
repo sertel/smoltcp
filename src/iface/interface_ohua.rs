@@ -3,6 +3,7 @@
 // and RFCs 8200 and 4861 for any IPv6 and NDISC work.
 
 use core::cmp;
+use std::collections::BTreeMap;
 use managed::{ManagedMap, ManagedSlice};
 
 use crate::iface::interface::{IgmpReportState, EthernetPacket,
@@ -14,7 +15,7 @@ use super::socket_set::SocketSet;
 use crate::iface::{Routes};
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use crate::iface::{NeighborAnswer, NeighborCache};
-use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Loopback, Medium, RxToken, TxToken};
 use crate::rand::Rand;
 #[cfg(feature = "socket-dhcpv4")]
 use crate::socket::dhcpv4;
@@ -148,7 +149,7 @@ macro_rules! assert_none {
 /// a dependency on heap allocation, it instead owns a `BorrowMut<[T]>`, which can be
 /// a `&mut [T]`, or `Vec<T>` if a heap is available.
 pub struct OInterface<'a> {
-    inner: Option<Context<'a>>,
+    pub(crate) inner: Option<Context<'a>>,
     fragments: FragmentsBuffer<'a>,
     out_packets: OutPackets<'a>,
 }
@@ -956,7 +957,7 @@ impl<'a> OInterface<'a> {
     }
 
     // ToDo: This is actually replaced by the socket_egress_tcp, remove when sure.
-    fn socket_egress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
+    pub(crate) fn socket_egress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
     where
         D: for<'d> Device<'d>,
     {
@@ -1371,6 +1372,37 @@ fn socket_egress_tcp_pre<'a>(
 }
 */
 
+pub fn mock<'a>() -> (OInterface<'a>, SocketSet<'a>, Loopback) {
+let mut device = Loopback::new(Medium::Ethernet);
+        let ip_addrs = [
+            #[cfg(feature = "proto-ipv4")]
+            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+            #[cfg(feature = "proto-ipv6")]
+            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+            #[cfg(feature = "proto-ipv6")]
+            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+        ];
+
+        let iface_builder = OInterfaceBuilder::new()
+            .hardware_addr(EthernetAddress::default().into())
+            .neighbor_cache(NeighborCache::new(BTreeMap::new()))
+            .ip_addrs(ip_addrs);
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        let iface_builder = iface_builder
+            .sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()))
+            .sixlowpan_out_packet_cache(vec![]);
+
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        let iface_builder =
+            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+
+        #[cfg(feature = "proto-igmp")]
+        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        let iface = iface_builder.finalize(&mut device);
+
+        (iface, SocketSet::new(vec![]), device)
+    }
 
 #[cfg(test)]
 mod test {
@@ -2740,15 +2772,16 @@ mod test {
    #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_tcp_socket_egress() {
+        use crate::socket::tcp::Socket;
         use crate::socket::tcp_ohua::OhuaTcpSocket;
         use crate::socket::tcp_ohua::test::{
-            socket_established_with_endpoints, TestSocket};
+            ohua_socket_established_with_endpoints, OhuaTestSocket};
         use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
 
         //smoltcp: egress_tcp
         let (mut iface1, mut sockets1, mut device1) = create();
 
-        let TestSocket{socket, cx} = socket_established_with_endpoints(
+        let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
                 // I could not enforce proto-ipv4
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
@@ -2764,7 +2797,7 @@ mod test {
 
         let tcp_socket_handle1 = sockets1.add(socket);
 
-        let socket1 = sockets1.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle1);
+        let socket1: &mut OhuaTcpSocket = sockets1.get_mut(tcp_socket_handle1);
         assert!(!socket1.can_recv());
         assert!(socket1.may_send());
         assert!(socket1.can_send());
@@ -2795,7 +2828,7 @@ mod test {
         // OHUA: socket_egress_tcp
         net_debug!("Now the same procedure for Ohua");
         let (mut iface2, mut sockets2, mut device2) = create();
-        let TestSocket{socket, cx} = socket_established_with_endpoints(
+        let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
                 // I could not enforce proto-ipv4
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),

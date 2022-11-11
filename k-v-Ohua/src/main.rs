@@ -5,7 +5,7 @@ use std::os::unix::io::RawFd;
 use defmt::debug;
 use ohua_util::init_components::{init_app_and_sockets, init_stack_and_device};
 use smoltcp::{Error,Result};
-use smoltcp::iface::{OInterface, Interface, SocketSet, poll_6_egress_ask};
+use smoltcp::iface::{OInterface, Interface, SocketSet, poll_7_egress_ask};
 use smoltcp::phy::{Device, TunTapInterface, wait as phy_wait};
 use smoltcp::time::Instant;
 use crate::ohua_util::init_components::App;
@@ -51,7 +51,7 @@ fn loop_as_rec(
     let timestamp = Instant::now();
     let (poll_res, mut ip_stack_poll, device_poll, sockets_poll):
         (Result<bool>, Interface, TunTapInterface, SocketSet) =
-        poll_6_egress_ask(timestamp, ip_stack, device, sockets);
+        poll_7_egress_ask(timestamp, ip_stack, device, sockets);
 
     let (should_continue, sockets_do_app_stuff): (bool, SocketSet) = app.do_app_stuff(sockets_poll, poll_res);
         
