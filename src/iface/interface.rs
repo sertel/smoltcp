@@ -1138,11 +1138,110 @@ impl<'a> Interface<'a> {
 
     fn simpl_poll_inner<D>(&mut self, device: &mut D, sockets: &mut SocketSet, readiness_may_have_changed: bool ) -> bool
         where
-        D: for<'d> Device<'d>,
-    {
-
+        D: for<'d> Device<'d>, {
         let processed_any = self.socket_ingress(device, sockets);
-        let emitted_any = self.socket_egress(device, sockets);
+        let emitted_any = {  //self.socket_egress(device, sockets);
+                let Self {
+                    inner,
+                    out_packets: _out_packets,
+                    ..
+                } = self;
+                let _caps = device.capabilities();
+                net_debug!("Socket Egress");
+                let mut emitted_any = false;
+                for item in sockets.items_mut() {
+                    if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
+                        continue;
+                    }
+
+                    let mut neighbor_addr = None;
+
+                    let mut respond = |inner: &mut InterfaceInner, response: IpPacket| {
+                        neighbor_addr = Some(response.ip_repr().dst_addr());
+                        let t = device.transmit().ok_or_else(|| {
+                            net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                            Error::Exhausted
+                        })?;
+
+                        #[cfg(any(feature = "proto-ipv4-fragmentation",
+                        feature = "proto-sixlowpan-fragmentation"))]
+                            inner.dispatch_ip(t, response, Some(_out_packets))?;
+
+                        #[cfg(not(any(feature = "proto-ipv4-fragmentation",
+                        feature = "proto-sixlowpan-fragmentation")))]
+                            inner.dispatch_ip(t, response, None)?;
+
+                        emitted_any = true;
+
+                        Ok(())
+                    };
+
+                    let result = match &mut item.socket {
+                        #[cfg(feature = "socket-raw")]
+                        Socket::Raw(socket) => socket.dispatch(inner, |inner, response| {
+                            respond(inner, IpPacket::Raw(response))
+                        }),
+                        #[cfg(feature = "socket-icmp")]
+                        Socket::Icmp(socket) => socket.dispatch(inner, |inner, response| match response {
+                            #[cfg(feature = "proto-ipv4")]
+                            (IpRepr::Ipv4(ipv4_repr), IcmpRepr::Ipv4(icmpv4_repr)) => {
+                                respond(inner, IpPacket::Icmpv4((ipv4_repr, icmpv4_repr)))
+                            }
+                            #[cfg(feature = "proto-ipv6")]
+                            (IpRepr::Ipv6(ipv6_repr), IcmpRepr::Ipv6(icmpv6_repr)) => {
+                                respond(inner, IpPacket::Icmpv6((ipv6_repr, icmpv6_repr)))
+                            }
+                            #[allow(unreachable_patterns)]
+                            _ => unreachable!(),
+                        }),
+                        #[cfg(feature = "socket-udp")]
+                        Socket::Udp(socket) => socket.dispatch(inner, |inner, response| {
+                            respond(inner, IpPacket::Udp(response))
+                        }),
+                        #[cfg(feature = "socket-tcp")]
+                        Socket::Tcp(socket) => socket.dispatch(inner, |inner, response| {
+                            respond(inner, IpPacket::Tcp(response))
+                        }),
+                        #[cfg(feature = "socket-dhcpv4")]
+                        Socket::Dhcpv4(socket) => socket.dispatch(inner, |inner, response| {
+                            respond(inner, IpPacket::Dhcpv4(response))
+                        }),
+                        #[cfg(feature = "socket-dns")]
+                        Socket::Dns(ref mut socket) => socket.dispatch(inner, |inner, response| {
+                            respond(inner, IpPacket::Udp(response))
+                        }),
+                        #[cfg(feature = "ohua")]
+                        Socket::OhuaTcp(ref mut socket) => socket.dispatch(inner, |inner, response| {
+                            respond(inner, IpPacket::Tcp(response))
+                        }),
+                        _ => panic!("Don't mix normal interface with Ohua raw sockets")
+                    };
+
+                    match result {
+                        Err(Error::Exhausted) => break, // Device buffer full.
+                        Err(Error::Unaddressable) => {
+                            // `NeighborCache` already takes care of rate limiting the neighbor discovery
+                            // requests from the socket. However, without an additional rate limiting
+                            // mechanism, we would spin on every socket that has yet to discover its
+                            // neighbor.
+                            item.meta.neighbor_missing(
+                                inner.now,
+                                neighbor_addr.expect("non-IP response packet"),
+                            );
+                            break;
+                        }
+                        Err(err) => {
+                            net_debug!(
+                                    "{}: cannot dispatch egress packet: {}",
+                                    item.meta.handle,
+                                    err
+                                );
+                        }
+                        Ok(()) => {}
+                    }
+                }
+            emitted_any
+        };
 
         // Also leave this out for now
         //#[cfg(feature = "proto-igmp")]
