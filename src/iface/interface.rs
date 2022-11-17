@@ -139,8 +139,8 @@ type PacketTwice<'a> = ((IpRepr, TcpRepr<'a>), (TcpReprP, IpRepr, bool));
 fn is_packet(maybe_packet:&Either<PacketTwice, Result<()>>)
              -> bool {
     match maybe_packet {
-        Either::Left(_) => false,
-        Either::Right(_) => true
+        Either::Left(_) => true,
+        Either::Right(_) => false
     }
 
 }
@@ -1147,7 +1147,6 @@ impl<'a> Interface<'a> {
                     ..
                 } = self;
                 let _caps = device.capabilities();
-                net_debug!("Socket Egress");
                 let mut emitted_any = false;
                 for item in sockets.items_mut() {
                     if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
@@ -1156,64 +1155,40 @@ impl<'a> Interface<'a> {
 
                     let mut neighbor_addr = None;
 
-                    let mut respond = |inner: &mut InterfaceInner, response: IpPacket| {
-                        neighbor_addr = Some(response.ip_repr().dst_addr());
-                        let t = device.transmit().ok_or_else(|| {
-                            net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                            Error::Exhausted
-                        })?;
-
-                        #[cfg(any(feature = "proto-ipv4-fragmentation",
-                        feature = "proto-sixlowpan-fragmentation"))]
-                            inner.dispatch_ip(t, response, Some(_out_packets))?;
-
-                        #[cfg(not(any(feature = "proto-ipv4-fragmentation",
-                        feature = "proto-sixlowpan-fragmentation")))]
-                            inner.dispatch_ip(t, response, None)?;
-
-                        emitted_any = true;
-
-                        Ok(())
-                    };
-
-                    let result = match &mut item.socket {
-                        #[cfg(feature = "socket-raw")]
-                        Socket::Raw(socket) => socket.dispatch(inner, |inner, response| {
-                            respond(inner, IpPacket::Raw(response))
-                        }),
-                        #[cfg(feature = "socket-icmp")]
-                        Socket::Icmp(socket) => socket.dispatch(inner, |inner, response| match response {
-                            #[cfg(feature = "proto-ipv4")]
-                            (IpRepr::Ipv4(ipv4_repr), IcmpRepr::Ipv4(icmpv4_repr)) => {
-                                respond(inner, IpPacket::Icmpv4((ipv4_repr, icmpv4_repr)))
-                            }
-                            #[cfg(feature = "proto-ipv6")]
-                            (IpRepr::Ipv6(ipv6_repr), IcmpRepr::Ipv6(icmpv6_repr)) => {
-                                respond(inner, IpPacket::Icmpv6((ipv6_repr, icmpv6_repr)))
-                            }
-                            #[allow(unreachable_patterns)]
-                            _ => unreachable!(),
-                        }),
-                        #[cfg(feature = "socket-udp")]
-                        Socket::Udp(socket) => socket.dispatch(inner, |inner, response| {
-                            respond(inner, IpPacket::Udp(response))
-                        }),
-                        #[cfg(feature = "socket-tcp")]
-                        Socket::Tcp(socket) => socket.dispatch(inner, |inner, response| {
-                            respond(inner, IpPacket::Tcp(response))
-                        }),
-                        #[cfg(feature = "socket-dhcpv4")]
-                        Socket::Dhcpv4(socket) => socket.dispatch(inner, |inner, response| {
-                            respond(inner, IpPacket::Dhcpv4(response))
-                        }),
-                        #[cfg(feature = "socket-dns")]
-                        Socket::Dns(ref mut socket) => socket.dispatch(inner, |inner, response| {
-                            respond(inner, IpPacket::Udp(response))
-                        }),
+                    let result:Result<()> = match &mut item.socket {
+                        /*
+                        For the sake of simplicity we only do this with one socket type
+                        leaving out the other matches for now.
+                         */
                         #[cfg(feature = "ohua")]
-                        Socket::OhuaTcp(ref mut socket) => socket.dispatch(inner, |inner, response| {
-                            respond(inner, IpPacket::Tcp(response))
-                        }),
+                        Socket::OhuaTcp(ref mut socket) => {
+                            let packet_or_ok = socket.dispatch_before(inner);
+                            if is_packet(&packet_or_ok) {
+                                let (response, response_and_keepalive) = from_packet(packet_or_ok);
+                                let neighbor_addr = Some(response.ip_repr().dst_addr());
+                                let sending_token = device.transmit();
+                                if let Some(token) = sending_token {
+                                    let dispatch_result = inner.dispatch_ip(token, response, None);
+                                    if dispatch_result.is_ok() {
+                                        // will neither fail nor return early
+                                        socket.dispatch_after::<Error>(inner, response_and_keepalive);
+                                        emitted_any = true;
+                                        //result = Ok(());
+                                        Ok(())
+                                    } else {
+                                        //result = dispatch_result;
+                                         dispatch_result
+                                    }
+                                } else {
+                                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                                    //result = Err(Error::Exhausted);
+                                    Err(Error::Exhausted)
+                                }
+                            } else {
+                                //result = Ok(());
+                                Ok(())
+                            }
+                         },
                         _ => panic!("Don't mix normal interface with Ohua raw sockets")
                     };
 
@@ -1240,6 +1215,7 @@ impl<'a> Interface<'a> {
                         Ok(()) => {}
                     }
                 }
+            net_debug!("Returning emitted_any as {:?}", emitted_any);
             emitted_any
         };
 
