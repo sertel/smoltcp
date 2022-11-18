@@ -1172,18 +1172,23 @@ impl<'a> Interface<'a> {
                             if is_packet(&packet_or_ok) {
                                 let (response, response_and_keepalive) = from_packet(packet_or_ok);
                                 let neighbor_addr = Some(response.ip_repr().dst_addr());
-                                let sending_token = device.transmit();
-                                if let Some(token) = sending_token {
-                                    let dispatch_result = inner.dispatch_ip(token, response, None);
-                                    if dispatch_result.is_ok() {
-                                        // will neither fail nor return early
-                                        socket.dispatch_after::<Error>(inner, response_and_keepalive);
-                                        emitted_any = true;
-                                        //result = Ok(());
-                                        Ok(())
+                                let sending_token = device.transmit_no_ref();
+                                if sending_token.is_some() {
+                                    let local_dispatch_result = inner.dispatch_local(response, None);
+                                    if let Ok((packet, timest)) = local_dispatch_result {
+                                        let send_result =
+                                            device.consume_no_ref(timest, packet, sending_token);
+                                        if send_result.is_ok() {
+                                            socket.dispatch_after::<Error>(inner, response_and_keepalive);
+                                            emitted_any = true;
+                                            //result = Ok(());
+                                            Ok(())
+                                        } else {
+                                            send_result
+                                        }
                                     } else {
                                         //result = dispatch_result;
-                                         dispatch_result
+                                         Err(local_dispatch_result.unwrap_err())
                                     }
                                 } else {
                                     net_debug!("failed to transmit IP: {}", Error::Exhausted);
@@ -5249,7 +5254,7 @@ mod test {
         //smoltcp
         let (mut iface1, mut sockets1, mut device1) = create();
 
-        let TestSocket{socket, cx} = socket_established_with_endpoints(
+        let TestSocket{socket, cx:_cx} = socket_established_with_endpoints(
             IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                     port: 80
@@ -5297,7 +5302,7 @@ mod test {
 
         net_debug!("Now the same procedure for socket_egress_tcp");
         let (mut iface2, mut sockets2, mut device2) = mock();
-        let OhuaTestSocket{socket, cx} =
+        let OhuaTestSocket{socket, cx:_cx} =
             ohua_socket_established_with_endpoints(
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
@@ -5345,7 +5350,7 @@ mod test {
         let (mut iface, mut sockets, mut device) = create();
 
         // we take an Ohua socket cause we want to use dispatch_before later
-        let OhuaTestSocket { socket, cx } = ohua_socket_established_with_endpoints(
+        let OhuaTestSocket { socket, cx:_cx } = ohua_socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -5378,7 +5383,7 @@ mod test {
     fn test_ohua_simple_poll_no_packet() {
         //This time without packets -> polling should return Ok(false)
         let (mut iface, mut sockets, mut device) = create();
-                let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
+                let OhuaTestSocket{socket, cx:_cx} = ohua_socket_established_with_endpoints(
                                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                     port: 80
@@ -5386,10 +5391,9 @@ mod test {
                 IpEndpoint {
                     addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
                     port: 49500} );
-
-        let tcp_socket_handle = sockets.add(socket);
         // we add a socket but no message
-        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let tcp_socket_handle = sockets.add(socket);
+
         let timestamp = Instant::now();
         let (poll_result, last_socket_egress_result) =
             iface.simple_poll_outer(timestamp, &mut device, &mut sockets);
@@ -5403,7 +5407,7 @@ mod test {
     fn test_ohua_simple_poll_wrong_socket_state() {
         //This time without packets -> polling should return Ok(false)
         let (mut iface, mut sockets, mut device) = create();
-        let OhuaTestSocket{socket, cx} =
+        let OhuaTestSocket{socket, cx: _cx} =
             ohua_socket_closing_with_endpoints(
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
@@ -5418,7 +5422,6 @@ mod test {
         // because the socket is in the wrong state and shouldn't produce a packet
         let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
         let msg = "hello".as_bytes();
-        let msg_len = msg.len();
         let result = socket.send_slice(msg);
         assert!(result.is_err());
         let timestamp = Instant::now();
@@ -5438,7 +5441,7 @@ mod test {
         //This time without packets -> polling should return Ok(false)
         let (mut iface, mut sockets, mut device) = create_ethernet_exhausted_device();
         assert!(device.transmit().is_none());
-        let OhuaTestSocket{socket, cx} =
+        let OhuaTestSocket{socket, cx:_cx} =
             ohua_socket_established_with_endpoints(
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),

@@ -341,16 +341,35 @@ pub trait Device<'a> {
         sending_result
     }
 
+    fn transmit_no_ref(&'a self) -> Option<()> {
+        Some(())
+    }
+
     fn consume_token(
         &'a mut self,
         timestamp:Instant,
         packet:Vec<u8>,
-        token:<Self as Device<'a>>::TxToken) -> Result<()> {
-        token.consume(timestamp, packet.len(),
+        token:Option<<Self as Device<'a>>::TxToken>) -> Result<()> {
+        token.unwrap().consume(timestamp, packet.len(),
                   |buffer| {
                       buffer.copy_from_slice(packet.as_slice());
                       Ok(())
                   })
+    }
+
+    fn consume_no_ref(
+    &'a mut self,
+    timestamp:Instant,
+    packet:Vec<u8>,
+    token:Option<()>) -> Result<()> {
+    let token = self
+        .transmit()
+        .ok_or(Error::Exhausted)?;
+    token.consume(timestamp, packet.len(),
+          |buffer| {
+              buffer.copy_from_slice(packet.as_slice());
+              Ok(())
+          })
     }
 }
 
