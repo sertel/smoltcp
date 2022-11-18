@@ -108,3 +108,48 @@ impl Loopback{
 
      */
 }
+// A constantly "exhausted" loopback device for tesing.
+#[derive(Debug)]
+pub struct BrokenLoopback {
+    queue: VecDeque<Vec<u8>>,
+    medium: Medium,
+}
+
+#[allow(clippy::new_without_default)]
+impl BrokenLoopback {
+    pub fn new(medium: Medium) -> BrokenLoopback {
+        BrokenLoopback {
+            queue: VecDeque::new(),
+            medium,
+        }
+    }
+    pub(crate) fn empty_tx(&self) -> bool {
+            self.queue.is_empty()
+        }
+    pub(crate) fn num_tx_packets(&self) -> usize {
+        self.queue.len()
+    }
+}
+
+impl<'a> Device<'a> for BrokenLoopback {
+    type RxToken = RxToken;
+    type TxToken = TxToken<'a>;
+
+    fn receive(&'a mut self) -> Option<(Self::RxToken, Self::TxToken)> {
+        None
+    }
+
+    fn transmit(&'a mut self) -> Option<Self::TxToken> {
+        None
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        DeviceCapabilities {
+            max_transmission_unit: 65535,
+            medium: self.medium,
+            ..DeviceCapabilities::default()
+        }
+    }
+
+}
+

@@ -1119,7 +1119,7 @@ impl<'a> Interface<'a> {
         timestamp: Instant,
         device: &mut D,
         sockets: &mut SocketSet<'_>,
-    ) -> Result<bool>
+    ) -> (Result<bool>, Result<()>)
     where
         D: for<'d> Device<'d>,
     {
@@ -1130,17 +1130,22 @@ impl<'a> Interface<'a> {
         // its possibel return types (currently Ok/Err/())
         //self.early_return_fragment_stuff(timestamp, device);
 
-        let mut readiness_may_have_changed =
+        let (readiness_may_have_changed, last_socket_result) =
             self.simpl_poll_inner(device, sockets,false);
 
-        Ok(readiness_may_have_changed)
+        (Ok(readiness_may_have_changed), last_socket_result)
     }
 
-    fn simpl_poll_inner<D>(&mut self, device: &mut D, sockets: &mut SocketSet, readiness_may_have_changed: bool ) -> bool
+    fn simpl_poll_inner<D>(
+        &mut self,
+        device: &mut D,
+        sockets: &mut SocketSet,
+        readiness_may_have_changed: bool )
+        -> (bool, Result<()>)
         where
         D: for<'d> Device<'d>, {
         let processed_any = self.socket_ingress(device, sockets);
-        let emitted_any = {  //self.socket_egress(device, sockets);
+        let (emitted_any, last_socket_result) = {
                 let Self {
                     inner,
                     out_packets: _out_packets,
@@ -1148,6 +1153,7 @@ impl<'a> Interface<'a> {
                 } = self;
                 let _caps = device.capabilities();
                 let mut emitted_any = false;
+                let mut temp_canarie = Ok(());
                 for item in sockets.items_mut() {
                     if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
                         continue;
@@ -1191,7 +1197,7 @@ impl<'a> Interface<'a> {
                          },
                         _ => panic!("Don't mix normal interface with Ohua raw sockets")
                     };
-
+                    temp_canarie = result.clone();
                     match result {
                         Err(Error::Exhausted) => break, // Device buffer full.
                         Err(Error::Unaddressable) => {
@@ -1215,8 +1221,7 @@ impl<'a> Interface<'a> {
                         Ok(()) => {}
                     }
                 }
-            net_debug!("Returning emitted_any as {:?}", emitted_any);
-            emitted_any
+            (emitted_any, temp_canarie)
         };
 
         // Also leave this out for now
@@ -1226,7 +1231,7 @@ impl<'a> Interface<'a> {
         if processed_any || emitted_any {
             self.simpl_poll_inner(device, sockets, true)
         } else {
-            readiness_may_have_changed
+            (readiness_may_have_changed, last_socket_result)
         }
 
     }
@@ -1280,7 +1285,7 @@ impl<'a> Interface<'a> {
     /// packets containing any unsupported protocol, option, or form, which is
     /// a very common occurrence and on a production system it should not even
     /// be logged.
-        pub fn poll<D>(
+    pub fn poll<D>(
         &mut self,
         timestamp: Instant,
         device: &mut D,
@@ -1320,8 +1325,9 @@ impl<'a> Interface<'a> {
 
         loop {
             let processed_any = self.socket_ingress(device, sockets);
-            let emitted_any = self.socket_egress(device, sockets);
-
+            net_debug!("Processed any was {}", processed_any);
+            let (emitted_any, emit_canarie) = self.socket_egress(device, sockets);
+            net_debug!("Emitted any was {}", emitted_any);
             #[cfg(feature = "proto-igmp")]
             self.igmp_egress(device)?;
 
@@ -1331,8 +1337,70 @@ impl<'a> Interface<'a> {
                 break;
             }
         }
-
+        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
         Ok(readiness_may_have_changed)
+    }
+
+    /// Basically a copy of poll, but to be able to test egress error handling
+    /// inside the poll transformation, while not having to change the real poll
+    /// I'll have this sligthly changed version for testing
+    pub fn test_poll<D>(
+        &mut self,
+        timestamp: Instant,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+    ) -> (Result<bool>, Result<()>)
+    where
+        D: for<'d> Device<'d>,
+    {
+        self.inner.now = timestamp;
+        let mut temp_canarie = Ok(());
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .ipv4_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return (Err(e), temp_canarie);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .sixlowpan_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return (Err(e), temp_canarie);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        match self.sixlowpan_egress(device) {
+            Ok(true) => return (Ok(true), temp_canarie),
+            Err(e) => return (Err(e), temp_canarie),
+            _ => (),
+        }
+
+        let mut readiness_may_have_changed = false;
+
+        loop {
+            let processed_any = self.socket_ingress(device, sockets);
+            net_debug!("Processed any was {}", processed_any);
+            let (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
+            net_debug!("Emitted any was {}", emitted_any);
+            #[cfg(feature = "proto-igmp")]
+            let igmp_result = self.igmp_egress(device);
+            if igmp_result.is_err() {
+                return (igmp_result, temp_canarie)
+            }
+
+            if processed_any || emitted_any {
+                readiness_may_have_changed = true;
+            } else {
+                break;
+            }
+        }
+        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
+        (Ok(readiness_may_have_changed), temp_canarie)
     }
     /// Return a _soft deadline_ for calling [poll] the next time.
     /// The [Instant] returned is the time at which you should call [poll] next.
@@ -1438,8 +1506,8 @@ impl<'a> Interface<'a> {
         processed_any
     }
 
-    fn socket_egress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
-    where
+    fn socket_egress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> (bool, Result<()>)
+        where
         D: for<'d> Device<'d>,
     {
         let Self {
@@ -1450,6 +1518,9 @@ impl<'a> Interface<'a> {
         let _caps = device.capabilities();
         net_debug!("Socket Egress");
         let mut emitted_any = false;
+        // To be able to check error handling during rewrite we keep
+        // track of the last (and only in most cases) result of socket egress
+        let mut temp_canarie = Ok(());
         for item in sockets.items_mut() {
             if !item
                 .meta
@@ -1524,7 +1595,7 @@ impl<'a> Interface<'a> {
                 }),
                 _ => panic!("Don't mix normal interface with Ohua raw sockets")
             };
-
+            temp_canarie = result.clone();
             match result {
                 Err(Error::Exhausted) => break, // Device buffer full.
                 Err(Error::Unaddressable) => {
@@ -1548,7 +1619,7 @@ impl<'a> Interface<'a> {
                 Ok(()) => {}
             }
         }
-        emitted_any
+        (emitted_any, temp_canarie)
     }
 
     /// Depending on `igmp_report_state` and the therein contained
@@ -3786,10 +3857,15 @@ mod test {
     use crate::iface::Interface;
     #[cfg(feature = "medium-ethernet")]
     use crate::iface::NeighborCache;
-    use crate::phy::{ChecksumCapabilities, Loopback};
+    use crate::phy::{ChecksumCapabilities, Loopback, BrokenLoopback};
     #[cfg(feature = "proto-igmp")]
     use crate::time::Instant;
     use crate::{Error, Result};
+    use crate::socket::tcp_ohua::test::{
+         OhuaTestSocket,
+         ohua_socket_established_with_endpoints,
+         ohua_socket_closing_with_endpoints};
+    use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
 
     #[allow(unused)]
     fn fill_slice(s: &mut [u8], val: u8) {
@@ -3804,6 +3880,7 @@ mod test {
         #[cfg(not(feature = "medium-ethernet"))]
         return create_ip();
     }
+
 
     #[cfg(all(feature = "medium-ip"))]
     #[allow(unused)]
@@ -3836,6 +3913,40 @@ mod test {
     fn create_ethernet<'a>() -> (Interface<'a>, SocketSet<'a>, Loopback) {
         // Create a basic device
         let mut device = Loopback::new(Medium::Ethernet);
+        let ip_addrs = [
+            #[cfg(feature = "proto-ipv4")]
+            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+            #[cfg(feature = "proto-ipv6")]
+            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+            #[cfg(feature = "proto-ipv6")]
+            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+        ];
+
+        let iface_builder = InterfaceBuilder::new()
+            .hardware_addr(EthernetAddress::default().into())
+            .neighbor_cache(NeighborCache::new(BTreeMap::new()))
+            .ip_addrs(ip_addrs);
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        let iface_builder = iface_builder
+            .sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()))
+            .sixlowpan_out_packet_cache(vec![]);
+
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        let iface_builder =
+            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+
+        #[cfg(feature = "proto-igmp")]
+        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        let iface = iface_builder.finalize(&mut device);
+
+        (iface, SocketSet::new(vec![]), device)
+    }
+
+        #[cfg(all(feature = "medium-ethernet"))]
+    fn create_ethernet_exhausted_device<'a>() -> (Interface<'a>, SocketSet<'a>, BrokenLoopback) {
+        // Create a basic device
+        let mut device = BrokenLoopback::new(Medium::Ethernet);
         let ip_addrs = [
             #[cfg(feature = "proto-ipv4")]
             IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
@@ -5167,7 +5278,9 @@ mod test {
         let result_len = socket1.send_slice(msg);
         assert_eq!(result_len, Ok(msg_len));
         net_debug!("running egress");
-        assert_eq!(iface1.socket_egress(&mut device1, &mut sockets1), true);
+        let (had_egress, last_socket_result) =
+            iface1.socket_egress(&mut device1, &mut sockets1);
+        assert_eq!((had_egress, last_socket_result), (true, Ok(())));
        // Make sure the data arrived at the device level:
         /* socket_egress gets a sending token from the device, passes is through
          socket.dispatch() and (in this case) device.transmi() -> inner_interface.dispatch()->
@@ -5226,25 +5339,21 @@ mod test {
 
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_ohua_simple_poll(){
-        use crate::socket::tcp_ohua::test::{
-            ohua_socket_established_with_endpoints, OhuaTestSocket};
-        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
-
-
+    fn test_ohua_simple_poll_works() {
         // Just check that the current version of poll rewrite works
         // We use the normal interface here
         let (mut iface, mut sockets, mut device) = create();
 
         // we take an Ohua socket cause we want to use dispatch_before later
-        let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
-                                IpEndpoint{
-                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                    port: 80
-                },
-                IpEndpoint {
-                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                    port: 49500} );
+        let OhuaTestSocket { socket, cx } = ohua_socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
 
         let tcp_socket_handle1 = sockets.add(socket);
 
@@ -5255,15 +5364,20 @@ mod test {
         assert_eq!(result_len, Ok(msg_len));
         let timestamp = Instant::now();
         // There is egress when there should be
-        let something_happend =
+        let (poll_result, last_socket_egress_result) =
             iface.simple_poll_outer(timestamp, &mut device, &mut sockets);
-        assert_eq!(something_happend, Ok(true));
-        //Reminder: We expect no packets in the device, because we called
-        //          ingress on a loopback so the message will be gone again
+        assert_eq!(poll_result, Ok(true));
+        assert_eq!(last_socket_egress_result, Ok(()));
+        // We expect no packets in the device, because we called
+        // ingress on a loopback so the message will be gone again
         assert_eq!(0, device.num_tx_packets());
+    }
 
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_ohua_simple_poll_no_packet() {
         //This time without packets -> polling should return Ok(false)
-        let (mut iface1, mut sockets, mut device) = create();
+        let (mut iface, mut sockets, mut device) = create();
                 let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
                                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
@@ -5276,11 +5390,78 @@ mod test {
         let tcp_socket_handle = sockets.add(socket);
         // we add a socket but no message
         let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
-        let nothing_happended = iface1
-            .simple_poll_outer( timestamp, &mut device, &mut sockets);
-        assert_eq!(nothing_happended, Ok(false));
+        let timestamp = Instant::now();
+        let (poll_result, last_socket_egress_result) =
+            iface.simple_poll_outer(timestamp, &mut device, &mut sockets);
+        assert_eq!(poll_result, Ok(false));
+        assert_eq!(last_socket_egress_result, Ok(()));
         assert_eq!(0, device.num_tx_packets());
     }
 
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_ohua_simple_poll_wrong_socket_state() {
+        //This time without packets -> polling should return Ok(false)
+        let (mut iface, mut sockets, mut device) = create();
+        let OhuaTestSocket{socket, cx} =
+            ohua_socket_closing_with_endpoints(
+                IpEndpoint{
+                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                    port: 80
+                },
+                IpEndpoint {
+                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                    port: 49500} );
+
+        let tcp_socket_handle = sockets.add(socket);
+        // we add a socket, prepare a messaeg but nothing should happen
+        // because the socket is in the wrong state and shouldn't produce a packet
+        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let msg = "hello".as_bytes();
+        let msg_len = msg.len();
+        let result = socket.send_slice(msg);
+        assert!(result.is_err());
+        let timestamp = Instant::now();
+        let (poll_result, last_egress_result) = iface
+            .test_poll( timestamp, &mut device, &mut sockets);
+        // We get a true here, because of ingress. This is the same
+        //  with the normal poll, so it is valid.
+        assert_eq!(poll_result, Ok(true));
+        // Wrong socket state will just yield an early return Ok()
+        assert_eq!(last_egress_result, Ok(()));
+        assert_eq!(0, device.num_tx_packets());
+    }
+
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_ohua_simple_poll_exhausted_device() {
+        //This time without packets -> polling should return Ok(false)
+        let (mut iface, mut sockets, mut device) = create_ethernet_exhausted_device();
+        assert!(device.transmit().is_none());
+        let OhuaTestSocket{socket, cx} =
+            ohua_socket_established_with_endpoints(
+                IpEndpoint{
+                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                    port: 80
+                },
+                IpEndpoint {
+                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                    port: 49500} );
+
+        let tcp_socket_handle = sockets.add(socket);
+        // we add a socket, prepare a message but nothing should happen
+        // because the device is exhausted
+        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let msg = "hello".as_bytes();
+        let msg_len = msg.len();
+        let result_len = socket.send_slice(msg);
+        assert_eq!(result_len, Ok(msg_len));
+        let timestamp = Instant::now();
+        let (poll_result, last_socket_egress_result) =
+            iface.simple_poll_outer( timestamp, &mut device, &mut sockets);
+        assert_eq!(poll_result, Ok(false));
+        assert_eq!(last_socket_egress_result, Err(Error::Exhausted));
+        assert_eq!(0, device.num_tx_packets());
+    }
 
 }

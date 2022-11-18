@@ -3008,6 +3008,12 @@ pub(crate) mod test {
         s
     }
 
+    pub(crate) fn ohua_socket_closing_with_endpoints(local:IpEndpoint, remote:IpEndpoint) -> OhuaTestSocket {
+        let mut s = socket_closing();
+        s.tuple = Some(Tuple{local, remote});
+        s
+    }
+
     fn socket_fin_wait_1() -> OhuaTestSocket {
         let mut s = socket_established();
         s.state = State::FinWait1;
