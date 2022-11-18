@@ -858,7 +858,7 @@ impl<'a> Interface<'a> {
     }
 
     //ToDo: the socket matching goes here so argument becomes :&mutSocket again
-    //ToDo: figure out a) if we need to derive lt annotations and b) How
+    //ToDo: figure out a) if we need to derive lt annotations and b) How to do so
     fn match_socket_dispatch_before<'s>(&'s mut self, item:&'s mut Item)
         -> Either<PacketTwice, Result<()>> {
         match &mut item.socket {
@@ -1145,85 +1145,56 @@ impl<'a> Interface<'a> {
         where
         D: for<'d> Device<'d>, {
         let processed_any = self.socket_ingress(device, sockets);
-        let (emitted_any, last_socket_result) = {
-                let Self {
-                    inner,
-                    out_packets: _out_packets,
-                    ..
-                } = self;
+        let (emitted_any, last_socket_result) =
+            {
                 let _caps = device.capabilities();
                 let mut emitted_any = false;
                 let mut temp_canarie = Ok(());
                 for item in sockets.items_mut() {
-                    if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
+                    if !self.item_meta_egress_permitted(item){
                         continue;
                     }
 
                     let mut neighbor_addr = None;
 
-                    let result:Result<()> = match &mut item.socket {
-                        /*
-                        For the sake of simplicity we only do this with one socket type
-                        leaving out the other matches for now.
-                         */
-                        #[cfg(feature = "ohua")]
-                        Socket::OhuaTcp(ref mut socket) => {
-                            let packet_or_ok = socket.dispatch_before(inner);
-                            if is_packet(&packet_or_ok) {
-                                let (response, response_and_keepalive) = from_packet(packet_or_ok);
-                                let neighbor_addr = Some(response.ip_repr().dst_addr());
-                                let sending_token = device.transmit_no_ref();
-                                if sending_token.is_some() {
-                                    let local_dispatch_result = inner.dispatch_local(response, None);
-                                    if let Ok((packet, timest)) = local_dispatch_result {
-                                        let send_result =
-                                            device.consume_no_ref(timest, packet, sending_token);
-                                        if send_result.is_ok() {
-                                            socket.dispatch_after::<Error>(inner, response_and_keepalive);
-                                            emitted_any = true;
-                                            //result = Ok(());
-                                            Ok(())
-                                        } else {
-                                            send_result
-                                        }
+                    let result:Result<()> =
+                    {
+                        let packet_or_ok =  self.match_socket_dispatch_before(item);
+                        if is_packet(&packet_or_ok) {
+                            let (response, response_and_keepalive) = from_packet(packet_or_ok);
+                            let neighbor_addr = Some(response.ip_repr().dst_addr());
+                            let sending_token = device.transmit_no_ref();
+                            if sending_token.is_some() {
+                                let local_dispatch_result = self.inner_dispatch_local(response, None);
+                                if let Ok((packet, timest)) = local_dispatch_result {
+                                    let send_result =
+                                        device.consume_no_ref(timest, packet, sending_token);
+                                    if send_result.is_ok() {
+                                        self.match_socket_dispatch_after(item, response_and_keepalive);
+                                        emitted_any = true;
+                                        //result = Ok(());
+                                        Ok(())
                                     } else {
-                                        //result = dispatch_result;
-                                         Err(local_dispatch_result.unwrap_err())
+                                        send_result
                                     }
                                 } else {
-                                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                                    //result = Err(Error::Exhausted);
-                                    Err(Error::Exhausted)
+                                    //result = dispatch_result;
+                                     Err(local_dispatch_result.unwrap_err())
                                 }
                             } else {
-                                //result = Ok(());
-                                Ok(())
+                                net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                                //result = Err(Error::Exhausted);
+                                Err(Error::Exhausted)
                             }
-                         },
-                        _ => panic!("Don't mix normal interface with Ohua raw sockets")
+                        } else {
+                            //result = Ok(());
+                            Ok(())
+                        }
                     };
                     temp_canarie = result.clone();
-                    match result {
-                        Err(Error::Exhausted) => break, // Device buffer full.
-                        Err(Error::Unaddressable) => {
-                            // `NeighborCache` already takes care of rate limiting the neighbor discovery
-                            // requests from the socket. However, without an additional rate limiting
-                            // mechanism, we would spin on every socket that has yet to discover its
-                            // neighbor.
-                            item.meta.neighbor_missing(
-                                inner.now,
-                                neighbor_addr.expect("non-IP response packet"),
-                            );
-                            break;
-                        }
-                        Err(err) => {
-                            net_debug!(
-                                    "{}: cannot dispatch egress packet: {}",
-                                    item.meta.handle,
-                                    err
-                                );
-                        }
-                        Ok(()) => {}
+                    let maybe_break = self.handle_result(result, item, neighbor_addr);
+                    if maybe_break {
+                        break
                     }
                 }
             (emitted_any, temp_canarie)
