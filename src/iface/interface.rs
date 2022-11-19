@@ -1151,50 +1151,48 @@ impl<'a> Interface<'a> {
                 let mut emitted_any = false;
                 let mut temp_canarie = Ok(());
                 for item in sockets.items_mut() {
-                    if !self.item_meta_egress_permitted(item){
-                        continue;
-                    }
+                    if self.item_meta_egress_permitted(item){
+                        let mut neighbor_addr = None;
 
-                    let mut neighbor_addr = None;
-
-                    let result:Result<()> =
-                    {
-                        let packet_or_ok =  self.match_socket_dispatch_before(item);
-                        if is_packet(&packet_or_ok) {
-                            let (response, response_and_keepalive) = from_packet(packet_or_ok);
-                            let neighbor_addr = Some(response.ip_repr().dst_addr());
-                            let sending_token = device.transmit_no_ref();
-                            if sending_token.is_some() {
-                                let local_dispatch_result = self.inner_dispatch_local(response, None);
-                                if let Ok((packet, timest)) = local_dispatch_result {
-                                    let send_result =
-                                        device.consume_no_ref(timest, packet, sending_token);
-                                    if send_result.is_ok() {
-                                        self.match_socket_dispatch_after(item, response_and_keepalive);
-                                        emitted_any = true;
-                                        //result = Ok(());
-                                        Ok(())
+                        let result:Result<()> =
+                        {
+                            let packet_or_ok =  self.match_socket_dispatch_before(item);
+                            if is_packet(&packet_or_ok) {
+                                let (response, response_and_keepalive) = from_packet(packet_or_ok);
+                                let neighbor_addr = Some(response.ip_repr().dst_addr());
+                                let sending_token = device.transmit_no_ref();
+                                if sending_token.is_some() {
+                                    let local_dispatch_result = self.inner_dispatch_local(response, None);
+                                    if let Ok((packet, timest)) = local_dispatch_result {
+                                        let send_result =
+                                            device.consume_no_ref(timest, packet, sending_token);
+                                        if send_result.is_ok() {
+                                            self.match_socket_dispatch_after(item, response_and_keepalive);
+                                            emitted_any = true;
+                                            //result = Ok(());
+                                            Ok(())
+                                        } else {
+                                            send_result
+                                        }
                                     } else {
-                                        send_result
+                                        //result = dispatch_result;
+                                         Err(local_dispatch_result.unwrap_err())
                                     }
                                 } else {
-                                    //result = dispatch_result;
-                                     Err(local_dispatch_result.unwrap_err())
+                                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                                    //result = Err(Error::Exhausted);
+                                    Err(Error::Exhausted)
                                 }
                             } else {
-                                net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                                //result = Err(Error::Exhausted);
-                                Err(Error::Exhausted)
+                                //result = Ok(());
+                                Ok(())
                             }
-                        } else {
-                            //result = Ok(());
-                            Ok(())
+                        };
+                        temp_canarie = result.clone();
+                        let maybe_break = self.handle_result(result, item, neighbor_addr);
+                        if maybe_break {
+                            break
                         }
-                    };
-                    temp_canarie = result.clone();
-                    let maybe_break = self.handle_result(result, item, neighbor_addr);
-                    if maybe_break {
-                        break
                     }
                 }
             (emitted_any, temp_canarie)
