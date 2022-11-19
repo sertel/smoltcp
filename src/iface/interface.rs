@@ -857,8 +857,6 @@ impl<'a> Interface<'a> {
         self.inner.has_neighbor(ipaddr)
     }
 
-    //ToDo: the socket matching goes here so argument becomes :&mutSocket again
-    //ToDo: figure out a) if we need to derive lt annotations and b) How to do so
     fn match_socket_dispatch_before<'s>(&'s mut self, item:&'s mut Item)
         -> Either<PacketTwice, Result<()>> {
         match &mut item.socket {
@@ -869,27 +867,61 @@ impl<'a> Interface<'a> {
 
     }
 
+    // We use those methods as an intermediate repacement
+    // for their 'non-DUMMY' counterparst. They do not
+    // need to borrow the interface mutably so we can keep running/testing
+    // the code while rewriting it to compile with the original again
+    fn match_socket_dispatch_before_DUMMY<'s>(&'s self, item:&'s mut Item)
+    -> Either<PacketTwice, Result<()>>
+    {
+        let mut innerDummy = InterfaceInner::mock();
+        match &mut item.socket {
+                    Socket::OhuaTcp(socket) =>
+                        socket.dispatch_before(&mut innerDummy),
+                    _ => panic!("Only Ohua TCP sockets supported!"),
+                }
+
+    }
+    fn match_socket_dispatch_after_DUMMY(
+    &self,
+    item:&mut Item,
+    response_and_bool:(TcpReprP, IpRepr, bool)) -> Result<()>
+    {
+        let mut innerDummy = InterfaceInner::mock();
+        match &mut item.socket {
+            Socket::OhuaTcp(socket) =>
+                socket.dispatch_after(&mut innerDummy, response_and_bool),
+            _ => panic!("Only Ohua TCP sockets supported!"),
+        }
+    }
+
+    fn inner_dispatch_local_DUMMY(&self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
+    ) -> Result<(Vec<u8>, Instant)> {
+        let mut innerDummy = InterfaceInner::mock();
+        innerDummy.dispatch_local(reponse, out_packets)
+    }
+
     fn inner_dispatch_local(&mut self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
     ) -> Result<(Vec<u8>, Instant)> {
         self.inner.dispatch_local(reponse, out_packets)
     }
 
-    //ToDo: the socket matching goes here so argument becomes :&mutSocket again
     fn match_socket_dispatch_after(
         &mut self,
         item:&mut Item,
-        response_and_bool:(TcpReprP, IpRepr, bool)) -> Result<()> {
+        response_and_bool:(TcpReprP, IpRepr, bool)) -> Result<()>
+    {
         match &mut item.socket {
             Socket::OhuaTcp(socket) =>
                 socket.dispatch_after(self.context(), response_and_bool),
             _ => panic!("Only Ohua TCP sockets supported!"),
         }
-
     }
+
+
 
     //ToDo: an item of iterating a socket set is this tuple type,
     //  but check if we can (autmatically) derive to use only the socket
-    //
     fn handle_result(&mut self, result:Result<()>,
                      item: &mut Item, neighbor_addr: Option<Address>) -> bool
     {
@@ -1150,24 +1182,25 @@ impl<'a> Interface<'a> {
                 let _caps = device.capabilities();
                 let mut emitted_any = false;
                 let mut temp_canarie = Ok(());
-                for item in sockets.items_mut() {
-                    if self.item_meta_egress_permitted(item){
+                let mut maybe_break = false;
+                let mut socket_iter = sockets.items_mut();
+                let mut item_optn = socket_iter.next();
+                while !maybe_break && item_optn.is_some() {
+                    let item = item_optn.unwrap();
+                    if self.item_meta_egress_permitted(item) {
                         let mut neighbor_addr = None;
-
-                        let result:Result<()> =
-                        {
-                            let packet_or_ok =  self.match_socket_dispatch_before(item);
+                        let result: Result<()> = {
+                            let packet_or_ok = self.match_socket_dispatch_before_DUMMY(item);
                             if is_packet(&packet_or_ok) {
                                 let (response, response_and_keepalive) = from_packet(packet_or_ok);
-                                let neighbor_addr = Some(response.ip_repr().dst_addr());
+                                neighbor_addr = Some(response.ip_repr().dst_addr());
                                 let sending_token = device.transmit_no_ref();
                                 if sending_token.is_some() {
-                                    let local_dispatch_result = self.inner_dispatch_local(response, None);
+                                    let local_dispatch_result = self.inner_dispatch_local_DUMMY(response, None);
                                     if let Ok((packet, timest)) = local_dispatch_result {
-                                        let send_result =
-                                            device.consume_no_ref(timest, packet, sending_token);
+                                        let send_result = device.consume_no_ref(timest, packet, sending_token);
                                         if send_result.is_ok() {
-                                            self.match_socket_dispatch_after(item, response_and_keepalive);
+                                            self.match_socket_dispatch_after_DUMMY(item, response_and_keepalive);
                                             emitted_any = true;
                                             //result = Ok(());
                                             Ok(())
@@ -1176,7 +1209,7 @@ impl<'a> Interface<'a> {
                                         }
                                     } else {
                                         //result = dispatch_result;
-                                         Err(local_dispatch_result.unwrap_err())
+                                        Err(local_dispatch_result.unwrap_err())
                                     }
                                 } else {
                                     net_debug!("failed to transmit IP: {}", Error::Exhausted);
@@ -1189,14 +1222,12 @@ impl<'a> Interface<'a> {
                             }
                         };
                         temp_canarie = result.clone();
-                        let maybe_break = self.handle_result(result, item, neighbor_addr);
-                        if maybe_break {
-                            break
-                        }
+                        maybe_break = self.handle_result(result, item, neighbor_addr);
                     }
+                    item_optn = socket_iter.next();
                 }
             (emitted_any, temp_canarie)
-        };
+            };
 
         // Also leave this out for now
         //#[cfg(feature = "proto-igmp")]
@@ -5407,6 +5438,7 @@ mod test {
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_simple_poll_exhausted_device() {
+        net_debug!("TEST DEVICE EXHAUSTED");
         //This time without packets -> polling should return Ok(false)
         let (mut iface, mut sockets, mut device) = create_ethernet_exhausted_device();
         assert!(device.transmit().is_none());
