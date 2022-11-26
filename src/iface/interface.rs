@@ -5,7 +5,8 @@
 use core::cmp;
 use std::rc::Rc;
 use core::cell::RefCell;
-use managed::{ManagedMap, ManagedSlice};
+use libc::socket;
+use managed::{ManagedMap, ManagedSlice, SlotIndex};
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 use super::fragmentation::PacketAssemblerSet;
@@ -282,6 +283,24 @@ pub struct Interface<'a> {
     inner: InterfaceInner<'a>,
     fragments: FragmentsBuffer<'a>,
     out_packets: OutPackets<'a>,
+    // We will probably replace this by a
+    // State = Option<Ingress{}> | Option<Egress{}>
+    currentEgressState: Option<EgressState<'a>>
+}
+
+
+struct EgressState<'es>{
+    //maybe we don't need the sockets but only the iterator
+    //sockets:&'es mut SocketSet<'es>,
+    //
+    socketIteratorState: Box<dyn std::iter::Iterator<Item = &'es mut Item<'es>>>,
+    // We need to reuse it, doesn't live as long as the other refs
+    currentSocket:Option<&'es mut Item<'es>>,
+    // we need it just once at the end of the EgressStates lifetime
+    currentNeighbor:Option<Address>,
+    //Copy of the intermediate results, we need to take it out and pass it to
+    //dispatch_after
+    currentResponse:Option< (TcpReprP, IpRepr, bool)>
 }
 
 /// The device independent part of an Ethernet network interface.
@@ -689,6 +708,7 @@ let iface = builder.finalize(&mut device);
                 tag,
                 rand,
             },
+            currentEgressState:None,
         }
     }
 }
@@ -871,28 +891,49 @@ impl<'a> Interface<'a> {
     // for their 'non-DUMMY' counterparst. They do not
     // need to borrow the interface mutably so we can keep running/testing
     // the code while rewriting it to compile with the original again
-    fn match_socket_dispatch_before_DUMMY<'s>(&'s self, item:&'s mut Item)
+    fn match_socket_dispatch_before_DUMMY<'s>(&'s mut self)
     -> Either<PacketTwice, Result<()>>
     {
         let mut innerDummy = InterfaceInner::mock();
-        match &mut item.socket {
-                    Socket::OhuaTcp(socket) =>
-                        socket.dispatch_before(&mut innerDummy),
-                    _ => panic!("Only Ohua TCP sockets supported!"),
-                }
-
+        let EgressState{
+            socketIteratorState,
+            currentSocket,
+            currentNeighbor,
+            currentResponse,
+        } = self.currentEgressState.take().unwrap();
+        let item = currentSocket.unwrap();
+        let result =match &mut item.socket{
+            Socket::OhuaTcp(socket) =>
+                socket.dispatch_before(&mut innerDummy),
+            _ => panic!("Only Ohua TCP sockets supported!"),
+        };
+        self.currentEgressState.replace(
+            EgressState{
+                socketIteratorState,
+                currentSocket:Some(item),
+                currentNeighbor,
+                currentResponse});
+        result
     }
-    fn match_socket_dispatch_after_DUMMY(
-    &self,
-    item:&mut Item,
-    response_and_bool:(TcpReprP, IpRepr, bool)) -> Result<()>
+
+    fn match_socket_dispatch_after_DUMMY(&mut self) -> Result<()>
     {
         let mut innerDummy = InterfaceInner::mock();
-        match &mut item.socket {
+        let EgressState{
+            socketIteratorState,
+            currentSocket,
+            currentNeighbor,
+            currentResponse,
+        } = self.currentEgressState.take().unwrap();
+       //match &mut item.socket {
+        let item = currentSocket.unwrap();
+        let result = match &mut item.socket{
             Socket::OhuaTcp(socket) =>
-                socket.dispatch_after(&mut innerDummy, response_and_bool),
+                socket.dispatch_after(&mut innerDummy, currentResponse.unwrap()),
             _ => panic!("Only Ohua TCP sockets supported!"),
-        }
+        };
+        self.currentEgressState.replace(EgressState{ socketIteratorState, currentSocket:Some(item), currentNeighbor, currentResponse:None });
+        result
     }
 
     fn inner_dispatch_local_DUMMY(&self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
@@ -1150,8 +1191,8 @@ impl<'a> Interface<'a> {
         &mut self,
         timestamp: Instant,
         device: &mut D,
-        sockets: &mut SocketSet<'_>,
-    ) -> (Result<bool>, Result<()>)
+        sockets: SocketSet<'a>,
+    ) -> (Result<bool>, Result<()>, SocketSet)
     where
         D: for<'d> Device<'d>,
     {
@@ -1162,70 +1203,58 @@ impl<'a> Interface<'a> {
         // its possibel return types (currently Ok/Err/())
         //self.early_return_fragment_stuff(timestamp, device);
 
-        let (readiness_may_have_changed, last_socket_result) =
+        let (readiness_may_have_changed, last_socket_result, sockets_used) =
             self.simpl_poll_inner(device, sockets,false);
 
-        (Ok(readiness_may_have_changed), last_socket_result)
+        (Ok(readiness_may_have_changed), last_socket_result, sockets_used)
     }
 
     fn simpl_poll_inner<D>(
         &mut self,
         device: &mut D,
-        sockets: &mut SocketSet,
+        mut sockets: SocketSet<'a>,
         readiness_may_have_changed: bool )
-        -> (bool, Result<()>)
+        -> (bool, Result<()>, SocketSet)
         where
         D: for<'d> Device<'d>, {
-        let processed_any = self.socket_ingress(device, sockets);
+        let processed_any = self.socket_ingress(device, &mut sockets);
         let (emitted_any, last_socket_result) =
             {
                 let _caps = device.capabilities();
                 let mut emitted_any = false;
                 let mut temp_canarie = Ok(());
-                let mut maybe_break = false;
-                let mut socket_iter = sockets.items_mut();
-                let mut item_optn = socket_iter.next();
-                while !maybe_break && item_optn.is_some() {
-                    let item = item_optn.unwrap();
-                    if self.item_meta_egress_permitted(item) {
-                        let mut neighbor_addr = None;
-                        let result: Result<()> = {
-                            let packet_or_ok = self.match_socket_dispatch_before_DUMMY(item);
-                            if is_packet(&packet_or_ok) {
-                                let (response, response_and_keepalive) = from_packet(packet_or_ok);
-                                neighbor_addr = Some(response.ip_repr().dst_addr());
-                                let sending_token = device.transmit_no_ref();
-                                if sending_token.is_some() {
-                                    let local_dispatch_result = self.inner_dispatch_local_DUMMY(response, None);
-                                    if let Ok((packet, timest)) = local_dispatch_result {
-                                        let send_result = device.consume_no_ref(timest, packet, sending_token);
-                                        if send_result.is_ok() {
-                                            self.match_socket_dispatch_after_DUMMY(item, response_and_keepalive);
-                                            emitted_any = true;
-                                            //result = Ok(());
-                                            Ok(())
-                                        } else {
-                                            send_result
-                                        }
-                                    } else {
-                                        //result = dispatch_result;
-                                        Err(local_dispatch_result.unwrap_err())
-                                    }
+
+                let mut next_packet_or_break = self.init_egress(&mut sockets);
+                while next_packet_or_break.is_some() {
+                    let result = {
+                        let sending_token = device.transmit_no_ref();
+                        if sending_token.is_some() {
+                            let local_dispatch_result =
+                                self.inner_dispatch_local_DUMMY(next_packet_or_break.unwrap(), None);
+                            if let Ok((packet, timest)) = local_dispatch_result {
+                                let send_result = device.consume_no_ref(timest, packet, sending_token);
+                                if send_result.is_ok() {
+                                    // has no arguments any more since they are part of the state
+                                    self.match_socket_dispatch_after_DUMMY();
+                                    emitted_any = true;
+                                    //result = Ok(());
+                                    Ok(())
                                 } else {
-                                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                                    //result = Err(Error::Exhausted);
-                                    Err(Error::Exhausted)
+                                    send_result
                                 }
                             } else {
-                                //result = Ok(());
-                                Ok(())
+                                //result = dispatch_result;
+                                Err(local_dispatch_result.unwrap_err())
                             }
-                        };
-                        temp_canarie = result.clone();
-                        maybe_break = self.handle_result(result, item, neighbor_addr);
-                    }
-                    item_optn = socket_iter.next();
-                }
+                        } else {
+                            net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                            //result = Err(Error::Exhausted);
+                            Err(Error::Exhausted)
+                        }
+                    };
+                    temp_canarie = result.clone();
+                    next_packet_or_break = self.handle_egress_state(result);
+            }
             (emitted_any, temp_canarie)
             };
 
@@ -1236,7 +1265,7 @@ impl<'a> Interface<'a> {
         if processed_any || emitted_any {
             self.simpl_poll_inner(device, sockets, true)
         } else {
-            (readiness_may_have_changed, last_socket_result)
+            (readiness_may_have_changed, last_socket_result, sockets)
         }
 
     }
@@ -1359,7 +1388,7 @@ impl<'a> Interface<'a> {
         D: for<'d> Device<'d>,
     {
         self.inner.now = timestamp;
-        let mut temp_canarie = Ok(());
+        let temp_canarie = Ok(());
         #[cfg(feature = "proto-ipv4-fragmentation")]
         if let Err(e) = self
             .fragments
@@ -1466,6 +1495,7 @@ impl<'a> Interface<'a> {
             inner,
             fragments: ref mut _fragments,
             out_packets: _out_packets,
+            ..
         } = self;
 
         while let Some((rx_token, tx_token)) = device.receive() {
@@ -1727,6 +1757,60 @@ impl<'a> Interface<'a> {
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+    fn handle_egress_state(&self, result: Result<()>) -> Option<IpPacket>  {
+        None
+    }
+
+    // This methods wraps loop control to the interface. Basically we do what
+    // the original loop did and spin the socket_iterator forward until we
+    // reach a socket that actually produces a packet.
+    // At that point we a) set the EgressState and b) return the packet obviously
+    // If we hit no such socket, we return None and egress is instantly over
+    fn init_egress(&mut self, sockets:&mut SocketSet) -> Option<IpPacket>{
+        let mut socket_iter = sockets.items_mut();
+        let mut item_optn = socket_iter.next();
+        let mut packet = None;
+        let mut neighbor_addr = None;
+        let mut currentResponse = None;
+        while item_optn.is_some() && packet.is_none(){
+            let item = item_optn.unwrap();
+            if item.meta.egress_permitted(self.inner.now,
+            |ip_addr| self.inner.has_neighbor(&ip_addr)){
+                let packet_or_ok = match &mut item.socket{
+                        Socket::OhuaTcp(socket) =>
+                            socket.dispatch_before(&mut self.inner),
+                        _ => panic!("Only Ohua TCP sockets supported!"),
+                    };
+                if is_packet(&packet_or_ok) {
+                    let (response, response_and_keepalive) = from_packet(packet_or_ok);
+                    neighbor_addr = Some(response.ip_repr().dst_addr());
+                    packet = Some(response);
+                    currentResponse = Some(response_and_keepalive);
+                }
+            }
+            item_optn = socket_iter.next();
+        }
+        if packet.is_some() {
+            // If there is a 'first' socket that can send, we set the
+            // egress state at using the current position of the iterator
+            self.currentEgressState = Some(
+                EgressState{
+                    socketIteratorState: Box::new(socket_iter),
+                    currentSocket: item_optn,
+                    currentNeighbor:neighbor_addr,
+                    currentResponse:currentResponse
+                }
+            );
+        }
+        return packet
+    }
+
+    fn reset_egress_state(&mut self) {
+        match self.currentEgressState.take() {
+            None => panic!("Can't return none existing sockets"),
+            Some(state) => ()
         }
     }
 }
@@ -5369,8 +5453,8 @@ mod test {
         assert_eq!(result_len, Ok(msg_len));
         let timestamp = Instant::now();
         // There is egress when there should be
-        let (poll_result, last_socket_egress_result) =
-            iface.simple_poll_outer(timestamp, &mut device, &mut sockets);
+        let (poll_result, last_socket_egress_result, _used_sockets) =
+            iface.simple_poll_outer(timestamp, &mut device, sockets);
         assert_eq!(poll_result, Ok(true));
         assert_eq!(last_socket_egress_result, Ok(()));
         // We expect no packets in the device, because we called
@@ -5395,8 +5479,8 @@ mod test {
         let tcp_socket_handle = sockets.add(socket);
 
         let timestamp = Instant::now();
-        let (poll_result, last_socket_egress_result) =
-            iface.simple_poll_outer(timestamp, &mut device, &mut sockets);
+        let (poll_result, last_socket_egress_result, _used_sockets) =
+            iface.simple_poll_outer(timestamp, &mut device, sockets);
         assert_eq!(poll_result, Ok(false));
         assert_eq!(last_socket_egress_result, Ok(()));
         assert_eq!(0, device.num_tx_packets());
@@ -5461,8 +5545,8 @@ mod test {
         let result_len = socket.send_slice(msg);
         assert_eq!(result_len, Ok(msg_len));
         let timestamp = Instant::now();
-        let (poll_result, last_socket_egress_result) =
-            iface.simple_poll_outer( timestamp, &mut device, &mut sockets);
+        let (poll_result, last_socket_egress_result, _used_sockets) =
+            iface.simple_poll_outer( timestamp, &mut device, sockets);
         assert_eq!(poll_result, Ok(false));
         assert_eq!(last_socket_egress_result, Err(Error::Exhausted));
         assert_eq!(0, device.num_tx_packets());

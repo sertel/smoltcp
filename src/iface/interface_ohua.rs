@@ -41,34 +41,6 @@ use crate::iface::interface::{IpPacket};
 /// biblical-proportion modules
 
 
-// Reminder: I need to pass a lifetime here because the original poll derived it from the &self
-/*
-fn poll_egress_only<'a, D>(timestamp:Instant, mut ip_stack: OInterface<'a>,
-                       mut device: D, mut sockets: SocketSet<'a>)
-    -> (Result<bool>, SocketSet<'a>, D)
-  where D: for<'d> Device<'d>
-{
-    ip_stack.inner_mut().now = timestamp;
-    // .. we leave out the optional fragments stuff for now
-    let device_ref = &mut device;
-    let sockets_ref = &mut sockets;
-    let mut readiness_may_have_changed = false;
-    loop {
-        //let processed_any = ip_stack.socket_ingress(device, sockets);
-        let emitted_any = ip_stack.socket_egress_ohua(device_ref, sockets_ref);
-
-        //#[cfg(feature = "proto-igmp")]
-        //self.igmp_egress()?;
-
-        if emitted_any {
-            readiness_may_have_changed = true;
-        } else {
-            break;
-        }
-    }
-
-    (Ok(readiness_may_have_changed), sockets, device)
-}*/
 
 // Question: We may infer the type of the device from the context. Should we try to eliminate
 //         generic types at this point?
