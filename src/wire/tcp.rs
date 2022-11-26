@@ -991,6 +991,7 @@ impl<'a> Repr<'a> {
 /// because the non-borrow part is much easier to deal with
 /// and share.
 #[cfg(feature = "ohua")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReprP {
     pub src_port: u16,
     pub dst_port: u16,

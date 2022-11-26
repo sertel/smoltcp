@@ -24,6 +24,7 @@ use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
+use crate::Either::Right;
 use crate::wire::ip::{Address};
 
 
@@ -52,86 +53,7 @@ impl LocalTxToken {
         buffer
     }
 }
-// Current Version of poll transformation
 
-pub fn poll_7_egress_ask<'a, D>(
-    timestamp: Instant,
-    mut ip_stack: Interface<'a>,
-    mut device: D,
-    mut sockets: SocketSet<'static>)
-    -> ( Result<bool>, Interface<'a>, D, SocketSet<'static>)
-    where D: for<'d> Device<'d>
-{
-    /*
-    ip_stack.set_inner_now(timestamp);
-    // .. we leave out the optional fragments stuff for now
-
-    let mut readiness_has_changed = false;
-
-    loop {
-        let processed_any = false;//ip_stack.socket_ingress(device, sockets);
-        // Begin of inlined ip_stack.socket_egress()
-        // -> ip_stack.socket_egress(device, sockets);
-
-        // this was neither used, nor did it modify the device
-        // let _caps = device.capabilities();
-        let mut emitted_any = false;
-
-        for item  in sockets.items_mut() {
-            // check egress permission for socket
-            if ip_stack.item_meta_egress_permitted(item)
-            {
-                let mut neighbor_addr = None;
-                let result:Result<()>;
-                let packet_or_ok =
-                    ip_stack.match_socket_dispatch_before(item);
-                if is_packet(&packet_or_ok) {
-                    let (response, response_and_keepalive) =
-                        from_packet(packet_or_ok);
-                    neighbor_addr = as_optn_addr(&response);
-                    let sending_token = device.transmit();
-                    if sending_token.is_some() {
-                        let local_dispatch_result = ip_stack.inner_dispatch_local(response, None);
-         // --------------------------------------------------------------------------------------------------------------
-                        if let Ok((packet, timest)) = local_dispatch_result{
-                            let send_result =
-                                device.consume_token(timest, packet, sending_token.unwrap());
-                            if send_result.is_ok() {
-                                result = ip_stack.match_socket_dispatch_after(item, response_and_keepalive);//item.socket.dispatch_after(response);
-                                emitted_any = true;
-                            } else {
-                                result = send_result
-                            }
-                        } else {
-                            result = Err(local_dispatch_result.unwrap_err());
-                        }
-                    } else {
-                        net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                        result = Err(Error::Exhausted);
-                    }
-                } else {
-                    result = Ok(());
-                }
-
-                let maybe_break = ip_stack.handle_result(result, item, neighbor_addr);
-                if maybe_break {
-                    break
-                    }
-                }
-            }
-            // End of inlined ip_stack.socket_egress()
-
-        if processed_any || emitted_any {
-            readiness_has_changed = true;
-        } else {
-            break;
-        }
-    }
-    (Ok(readiness_has_changed), ip_stack, device, sockets)
-
-     */
-    (Ok(false), ip_stack, device, sockets)
-}
 // ToDo: ReprP is just a conversion from Repr made in
 //  dispatch_before_optn -> check if that makes sense or should be moved
 //  downstream where it's needed
@@ -866,9 +788,6 @@ pub(crate) enum IgmpReportState {
 impl<'a> Interface<'a> {
     //Starting here functions are wrappers
     // created during 'transormation''
-    fn set_inner_now(&mut self, timestamp:Instant) {
-        self.inner.now = timestamp;
-    }
     fn inner_now(&mut self) -> Instant {
         self.inner.now
     }
@@ -877,24 +796,11 @@ impl<'a> Interface<'a> {
         self.inner.has_neighbor(ipaddr)
     }
 
-    fn match_socket_dispatch_before<'s>(&'s mut self, item:&'s mut Item)
-        -> Either<PacketTwice, Result<()>> {
-        match &mut item.socket {
-                    Socket::OhuaTcp(socket) =>
-                        socket.dispatch_before(&mut self.inner),
-                    _ => panic!("Only Ohua TCP sockets supported!"),
-                }
-
-    }
-
-    // We use those methods as an intermediate repacement
-    // for their 'non-DUMMY' counterparst. They do not
-    // need to borrow the interface mutably so we can keep running/testing
-    // the code while rewriting it to compile with the original again
-    fn match_socket_dispatch_before_DUMMY<'s>(&'s mut self)
-    -> Either<PacketTwice, Result<()>>
+    fn match_socket_dispatch_before<'s>(
+        &'s mut self,
+        item:&'s mut Item)
+        -> Either<PacketTwice, Result<()>>
     {
-        let mut innerDummy = InterfaceInner::mock();
         let EgressState{
             socketIteratorState,
             currentSocket,
@@ -904,21 +810,21 @@ impl<'a> Interface<'a> {
         let item = currentSocket.unwrap();
         let result =match &mut item.socket{
             Socket::OhuaTcp(socket) =>
-                socket.dispatch_before(&mut innerDummy),
+                socket.dispatch_before(self.context()),
             _ => panic!("Only Ohua TCP sockets supported!"),
         };
+        let fake_serialized_result = result.clone();
         self.currentEgressState.replace(
             EgressState{
                 socketIteratorState,
                 currentSocket:Some(item),
                 currentNeighbor,
                 currentResponse});
-        result
+        fake_serialized_result
     }
 
-    fn match_socket_dispatch_after_DUMMY(&mut self) -> Result<()>
+    fn match_socket_dispatch_after( &mut self) -> Result<()>
     {
-        let mut innerDummy = InterfaceInner::mock();
         let EgressState{
             socketIteratorState,
             currentSocket,
@@ -929,37 +835,18 @@ impl<'a> Interface<'a> {
         let item = currentSocket.unwrap();
         let result = match &mut item.socket{
             Socket::OhuaTcp(socket) =>
-                socket.dispatch_after(&mut innerDummy, currentResponse.unwrap()),
+                socket.dispatch_after(self.context(), currentResponse.unwrap()),
             _ => panic!("Only Ohua TCP sockets supported!"),
         };
         self.currentEgressState.replace(EgressState{ socketIteratorState, currentSocket:Some(item), currentNeighbor, currentResponse:None });
-        result
-    }
-
-    fn inner_dispatch_local_DUMMY(&self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
-    ) -> Result<(Vec<u8>, Instant)> {
-        let mut innerDummy = InterfaceInner::mock();
-        innerDummy.dispatch_local(reponse, out_packets)
+        result.clone()
     }
 
     fn inner_dispatch_local(&mut self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
     ) -> Result<(Vec<u8>, Instant)> {
         self.inner.dispatch_local(reponse, out_packets)
     }
-
-    fn match_socket_dispatch_after(
-        &mut self,
-        item:&mut Item,
-        response_and_bool:(TcpReprP, IpRepr, bool)) -> Result<()>
-    {
-        match &mut item.socket {
-            Socket::OhuaTcp(socket) =>
-                socket.dispatch_after(self.context(), response_and_bool),
-            _ => panic!("Only Ohua TCP sockets supported!"),
-        }
-    }
-
-
+    
 
     //ToDo: an item of iterating a socket set is this tuple type,
     //  but check if we can (autmatically) derive to use only the socket
@@ -1011,7 +898,332 @@ impl<'a> Interface<'a> {
         &mut self.inner
     }
 
-    /// Get the HardwareAddress address of the interface.
+    /// If we refactor the inner loop of an algo to a recursion  we do not
+    /// want to refactor the algo as such, because then we would need to find all
+    /// its call sides to change the arguments to that call and we would
+    /// need condtional execution of the non-lopping parts
+    /// So we create an a recusive function jsut from the loop part.
+    pub fn simple_poll_outer<D>(
+        &mut self,
+        timestamp: Instant,
+        device: &mut D,
+        sockets: SocketSet<'a>,
+    ) -> (Result<bool>, Result<()>, SocketSet)
+    where
+        D: for<'d> Device<'d>,
+    {
+        self.inner.now = timestamp;
+
+        //This is actually not correctly wrapped as it
+        //can early return from poll and as we need to change
+        // its possibel return types (currently Ok/Err/())
+        //self.early_return_fragment_stuff(timestamp, device);
+
+        let (readiness_may_have_changed, last_socket_result, sockets_used) =
+            self.simpl_poll_inner(device, sockets,false);
+
+        (Ok(readiness_may_have_changed), last_socket_result, sockets_used)
+    }
+
+    fn simpl_poll_inner<D>(
+        &mut self,
+        device: &mut D,
+        mut sockets: SocketSet<'a>,
+        readiness_may_have_changed: bool )
+        -> (bool, Result<()>, SocketSet)
+        where
+        D: for<'d> Device<'d>, {
+        let processed_any = self.socket_ingress(device, &mut sockets);
+        let (emitted_any, last_socket_result) =
+            {
+                let _caps = device.capabilities();
+                let mut emitted_any = false;
+                let mut temp_canarie = Ok(());
+                let mut next_packet_or_break = self.init_egress(&mut sockets);
+                self.egress_recursion(next_packet_or_break, device, emitted_any, temp_canarie)
+            };
+
+        // Also leave this out for now
+        //#[cfg(feature = "proto-igmp")]
+        //self.igmp_egress(device)?;
+
+        if processed_any || emitted_any {
+            self.simpl_poll_inner(device, sockets, true)
+        } else {
+            (readiness_may_have_changed, last_socket_result, sockets)
+        }
+
+    }
+
+    fn egress_recursion<'p, D>(
+        &mut self,
+        mut next_packet_or_break: Option<IpPacket<'p>>,
+        device: &mut D,
+        mut emitted_any: bool,
+        mut temp_canarie: Result<()>)
+        -> (bool, Result<()>) where D: for<'d> Device<'d>
+    {
+        if next_packet_or_break.is_some() {
+            let result = {
+                let sending_token = device.transmit_no_ref();
+                if sending_token.is_some() {
+                    let local_dispatch_result =
+                        self.inner_dispatch_local(next_packet_or_break.unwrap(), None);
+                    if let Ok((packet, timest)) = local_dispatch_result {
+                        let send_result = device.consume_no_ref(timest, packet, sending_token);
+                        if send_result.is_ok() {
+                            // has no arguments any more since they are part of the state
+                            self.match_socket_dispatch_after();
+                            emitted_any = true;
+                            //result = Ok(());
+                            Ok(())
+                        } else {
+                            send_result
+                        }
+                    } else {
+                        //result = dispatch_result;
+                        Err(local_dispatch_result.unwrap_err())
+                    }
+                } else {
+                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                    //result = Err(Error::Exhausted);
+                    Err(Error::Exhausted)
+                }
+            };
+            temp_canarie = result.clone();
+            next_packet_or_break = self.handle_egress_state(result);
+            self.egress_recursion(next_packet_or_break, device, emitted_any, temp_canarie)
+        } else {
+        (emitted_any, temp_canarie)
+        }
+    }
+
+
+    fn handle_egress_state(&self, result: Result<()>) -> Option<IpPacket>  {
+        None
+    }
+
+    // This methods wraps loop control to the interface. Basically we do what
+    // the original loop did and spin the socket_iterator forward until we
+    // reach a socket that actually produces a packet.
+    // At that point we a) set the EgressState and b) return the packet obviously
+    // If we hit no such socket, we return None and egress is instantly over
+    fn init_egress(&mut self, sockets:&mut SocketSet) -> Option<IpPacket>{
+        let mut socket_iter = sockets.items_mut();
+        let mut item_optn = socket_iter.next();
+        let mut packet = None;
+        let mut neighbor_addr = None;
+        let mut currentResponse = None;
+        while item_optn.is_some() && packet.is_none(){
+            let item = item_optn.unwrap();
+            if item.meta.egress_permitted(self.inner.now,
+            |ip_addr| self.inner.has_neighbor(&ip_addr)){
+                let packet_or_ok = match &mut item.socket{
+                        Socket::OhuaTcp(socket) =>
+                            socket.dispatch_before(&mut self.inner),
+                        _ => panic!("Only Ohua TCP sockets supported!"),
+                    };
+                if is_packet(&packet_or_ok) {
+                    let (response, response_and_keepalive) = from_packet(packet_or_ok);
+                    neighbor_addr = Some(response.ip_repr().dst_addr());
+                    packet = Some(response);
+                    currentResponse = Some(response_and_keepalive);
+                }
+            }
+            item_optn = socket_iter.next();
+        }
+        if packet.is_some() {
+            // If there is a 'first' socket that can send, we set the
+            // egress state at using the current position of the iterator
+            self.currentEgressState = Some(
+                EgressState{
+                    socketIteratorState: Box::new(socket_iter),
+                    currentSocket: item_optn,
+                    currentNeighbor:neighbor_addr,
+                    currentResponse:currentResponse
+                }
+            );
+        }
+        return packet
+    }
+
+    fn reset_egress_state(&mut self) {
+        match self.currentEgressState.take() {
+            None => panic!("Can't return none existing sockets"),
+            Some(state) => ()
+        }
+    }
+
+
+    fn early_return_fragment_stuff<D>(&mut self, timestamp: Instant, device: &mut D)
+    where
+        D: for<'d> Device<'d>,
+    {
+        /*
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .ipv4_fragments
+            .remove_when(|frag| Ok(timestamp >= frag
+                .expires_at()?)) {
+            return Err(e);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .sixlowpan_fragments
+            .remove_when(|frag| Ok(timestamp >= frag
+                .expires_at()?)) {
+            return Err(e);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        match self.sixlowpan_egress(device) {
+            Ok(true) => return Ok(true),
+            Err(e) => return Err(e),
+            _ => (),
+        }*/
+    }
+
+    /// Transmit packets queued in the given sockets, and receive packets queued
+    /// in the device.
+    ///
+    /// This function returns a boolean value indicating whether any packets were
+    /// processed or emitted, and thus, whether the readiness of any socket might
+    /// have changed.
+    ///
+    /// # Errors
+    /// This method will routinely return errors in response to normal network
+    /// activity as well as certain boundary conditions such as buffer exhaustion.
+    /// These errors are provided as an aid for troubleshooting, and are meant
+    /// to be logged and ignored.
+    ///
+    /// As a special case, `Err(Error::Unrecognized)` is returned in response to
+    /// packets containing any unsupported protocol, option, or form, which is
+    /// a very common occurrence and on a production system it should not even
+    /// be logged.
+    pub fn poll<D>(
+        &mut self,
+        timestamp: Instant,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+    ) -> Result<bool>
+    where
+        D: for<'d> Device<'d>,
+    {
+        self.inner.now = timestamp;
+
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .ipv4_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return Err(e);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .sixlowpan_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return Err(e);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        match self.sixlowpan_egress(device) {
+            Ok(true) => return Ok(true),
+            Err(e) => return Err(e),
+            _ => (),
+        }
+
+        let mut readiness_may_have_changed = false;
+
+        loop {
+            let processed_any = self.socket_ingress(device, sockets);
+            net_debug!("Processed any was {}", processed_any);
+            let (emitted_any, emit_canarie) = self.socket_egress(device, sockets);
+            net_debug!("Emitted any was {}", emitted_any);
+            #[cfg(feature = "proto-igmp")]
+            self.igmp_egress(device)?;
+
+            if processed_any || emitted_any {
+                readiness_may_have_changed = true;
+            } else {
+                break;
+            }
+        }
+        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
+        Ok(readiness_may_have_changed)
+    }
+
+    /// Basically a copy of poll, but to be able to test egress error handling
+    /// inside the poll transformation, while not having to change the real poll
+    /// I'll have this sligthly changed version for testing
+    pub fn test_poll<D>(
+        &mut self,
+        timestamp: Instant,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+    ) -> (Result<bool>, Result<()>)
+    where
+        D: for<'d> Device<'d>,
+    {
+        self.inner.now = timestamp;
+        let temp_canarie = Ok(());
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .ipv4_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return (Err(e), temp_canarie);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .sixlowpan_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return (Err(e), temp_canarie);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        match self.sixlowpan_egress(device) {
+            Ok(true) => return (Ok(true), temp_canarie),
+            Err(e) => return (Err(e), temp_canarie),
+            _ => (),
+        }
+
+        let mut readiness_may_have_changed = false;
+
+        loop {
+            let processed_any = self.socket_ingress(device, sockets);
+            net_debug!("Processed any was {}", processed_any);
+            let (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
+            net_debug!("Emitted any was {}", emitted_any);
+            #[cfg(feature = "proto-igmp")]
+            let igmp_result = self.igmp_egress(device);
+            if igmp_result.is_err() {
+                return (igmp_result, temp_canarie)
+            }
+
+            if processed_any || emitted_any {
+                readiness_may_have_changed = true;
+            } else {
+                break;
+            }
+        }
+        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
+        (Ok(readiness_may_have_changed), temp_canarie)
+    }
+
+
+
+        /// Get the HardwareAddress address of the interface.
     ///
     /// # Panics
     /// This function panics if the medium is not Ethernet or Ieee802154.
@@ -1182,260 +1394,7 @@ impl<'a> Interface<'a> {
         &mut self.inner.routes
     }
 
-    /// If we refactor the inner loop of an algo to a recursion  we do not
-    /// want to refactor the algo as such, because then we would need to find all
-    /// its call sides to change the arguments to that call and we would
-    /// need condtional execution of the non-lopping parts
-    /// So we create an a recusive function jsut from the loop part.
-    pub fn simple_poll_outer<D>(
-        &mut self,
-        timestamp: Instant,
-        device: &mut D,
-        sockets: SocketSet<'a>,
-    ) -> (Result<bool>, Result<()>, SocketSet)
-    where
-        D: for<'d> Device<'d>,
-    {
-        self.inner.now = timestamp;
 
-        //This is actually not correctly wrapped as it
-        //can early return from poll and as we need to change
-        // its possibel return types (currently Ok/Err/())
-        //self.early_return_fragment_stuff(timestamp, device);
-
-        let (readiness_may_have_changed, last_socket_result, sockets_used) =
-            self.simpl_poll_inner(device, sockets,false);
-
-        (Ok(readiness_may_have_changed), last_socket_result, sockets_used)
-    }
-
-    fn simpl_poll_inner<D>(
-        &mut self,
-        device: &mut D,
-        mut sockets: SocketSet<'a>,
-        readiness_may_have_changed: bool )
-        -> (bool, Result<()>, SocketSet)
-        where
-        D: for<'d> Device<'d>, {
-        let processed_any = self.socket_ingress(device, &mut sockets);
-        let (emitted_any, last_socket_result) =
-            {
-                let _caps = device.capabilities();
-                let mut emitted_any = false;
-                let mut temp_canarie = Ok(());
-
-                let mut next_packet_or_break = self.init_egress(&mut sockets);
-                while next_packet_or_break.is_some() {
-                    let result = {
-                        let sending_token = device.transmit_no_ref();
-                        if sending_token.is_some() {
-                            let local_dispatch_result =
-                                self.inner_dispatch_local_DUMMY(next_packet_or_break.unwrap(), None);
-                            if let Ok((packet, timest)) = local_dispatch_result {
-                                let send_result = device.consume_no_ref(timest, packet, sending_token);
-                                if send_result.is_ok() {
-                                    // has no arguments any more since they are part of the state
-                                    self.match_socket_dispatch_after_DUMMY();
-                                    emitted_any = true;
-                                    //result = Ok(());
-                                    Ok(())
-                                } else {
-                                    send_result
-                                }
-                            } else {
-                                //result = dispatch_result;
-                                Err(local_dispatch_result.unwrap_err())
-                            }
-                        } else {
-                            net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                            //result = Err(Error::Exhausted);
-                            Err(Error::Exhausted)
-                        }
-                    };
-                    temp_canarie = result.clone();
-                    next_packet_or_break = self.handle_egress_state(result);
-            }
-            (emitted_any, temp_canarie)
-            };
-
-        // Also leave this out for now
-        //#[cfg(feature = "proto-igmp")]
-        //self.igmp_egress(device)?;
-
-        if processed_any || emitted_any {
-            self.simpl_poll_inner(device, sockets, true)
-        } else {
-            (readiness_may_have_changed, last_socket_result, sockets)
-        }
-
-    }
-
-
-    fn early_return_fragment_stuff<D>(&mut self, timestamp: Instant, device: &mut D)
-    where
-        D: for<'d> Device<'d>,
-    {
-        /*
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .ipv4_fragments
-            .remove_when(|frag| Ok(timestamp >= frag
-                .expires_at()?)) {
-            return Err(e);
-        }
-
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .sixlowpan_fragments
-            .remove_when(|frag| Ok(timestamp >= frag
-                .expires_at()?)) {
-            return Err(e);
-        }
-
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        match self.sixlowpan_egress(device) {
-            Ok(true) => return Ok(true),
-            Err(e) => return Err(e),
-            _ => (),
-        }*/
-    }
-
-    /// Transmit packets queued in the given sockets, and receive packets queued
-    /// in the device.
-    ///
-    /// This function returns a boolean value indicating whether any packets were
-    /// processed or emitted, and thus, whether the readiness of any socket might
-    /// have changed.
-    ///
-    /// # Errors
-    /// This method will routinely return errors in response to normal network
-    /// activity as well as certain boundary conditions such as buffer exhaustion.
-    /// These errors are provided as an aid for troubleshooting, and are meant
-    /// to be logged and ignored.
-    ///
-    /// As a special case, `Err(Error::Unrecognized)` is returned in response to
-    /// packets containing any unsupported protocol, option, or form, which is
-    /// a very common occurrence and on a production system it should not even
-    /// be logged.
-    pub fn poll<D>(
-        &mut self,
-        timestamp: Instant,
-        device: &mut D,
-        sockets: &mut SocketSet<'_>,
-    ) -> Result<bool>
-    where
-        D: for<'d> Device<'d>,
-    {
-        self.inner.now = timestamp;
-
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .ipv4_fragments
-            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
-        {
-            return Err(e);
-        }
-
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .sixlowpan_fragments
-            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
-        {
-            return Err(e);
-        }
-
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        match self.sixlowpan_egress(device) {
-            Ok(true) => return Ok(true),
-            Err(e) => return Err(e),
-            _ => (),
-        }
-
-        let mut readiness_may_have_changed = false;
-
-        loop {
-            let processed_any = self.socket_ingress(device, sockets);
-            net_debug!("Processed any was {}", processed_any);
-            let (emitted_any, emit_canarie) = self.socket_egress(device, sockets);
-            net_debug!("Emitted any was {}", emitted_any);
-            #[cfg(feature = "proto-igmp")]
-            self.igmp_egress(device)?;
-
-            if processed_any || emitted_any {
-                readiness_may_have_changed = true;
-            } else {
-                break;
-            }
-        }
-        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
-        Ok(readiness_may_have_changed)
-    }
-
-    /// Basically a copy of poll, but to be able to test egress error handling
-    /// inside the poll transformation, while not having to change the real poll
-    /// I'll have this sligthly changed version for testing
-    pub fn test_poll<D>(
-        &mut self,
-        timestamp: Instant,
-        device: &mut D,
-        sockets: &mut SocketSet<'_>,
-    ) -> (Result<bool>, Result<()>)
-    where
-        D: for<'d> Device<'d>,
-    {
-        self.inner.now = timestamp;
-        let temp_canarie = Ok(());
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .ipv4_fragments
-            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
-        {
-            return (Err(e), temp_canarie);
-        }
-
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .sixlowpan_fragments
-            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
-        {
-            return (Err(e), temp_canarie);
-        }
-
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        match self.sixlowpan_egress(device) {
-            Ok(true) => return (Ok(true), temp_canarie),
-            Err(e) => return (Err(e), temp_canarie),
-            _ => (),
-        }
-
-        let mut readiness_may_have_changed = false;
-
-        loop {
-            let processed_any = self.socket_ingress(device, sockets);
-            net_debug!("Processed any was {}", processed_any);
-            let (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
-            net_debug!("Emitted any was {}", emitted_any);
-            #[cfg(feature = "proto-igmp")]
-            let igmp_result = self.igmp_egress(device);
-            if igmp_result.is_err() {
-                return (igmp_result, temp_canarie)
-            }
-
-            if processed_any || emitted_any {
-                readiness_may_have_changed = true;
-            } else {
-                break;
-            }
-        }
-        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
-        (Ok(readiness_may_have_changed), temp_canarie)
-    }
     /// Return a _soft deadline_ for calling [poll] the next time.
     /// The [Instant] returned is the time at which you should call [poll] next.
     /// It is harmless (but wastes energy) to call it before the [Instant], and
@@ -1759,61 +1718,8 @@ impl<'a> Interface<'a> {
             Ok(false)
         }
     }
-    fn handle_egress_state(&self, result: Result<()>) -> Option<IpPacket>  {
-        None
-    }
-
-    // This methods wraps loop control to the interface. Basically we do what
-    // the original loop did and spin the socket_iterator forward until we
-    // reach a socket that actually produces a packet.
-    // At that point we a) set the EgressState and b) return the packet obviously
-    // If we hit no such socket, we return None and egress is instantly over
-    fn init_egress(&mut self, sockets:&mut SocketSet) -> Option<IpPacket>{
-        let mut socket_iter = sockets.items_mut();
-        let mut item_optn = socket_iter.next();
-        let mut packet = None;
-        let mut neighbor_addr = None;
-        let mut currentResponse = None;
-        while item_optn.is_some() && packet.is_none(){
-            let item = item_optn.unwrap();
-            if item.meta.egress_permitted(self.inner.now,
-            |ip_addr| self.inner.has_neighbor(&ip_addr)){
-                let packet_or_ok = match &mut item.socket{
-                        Socket::OhuaTcp(socket) =>
-                            socket.dispatch_before(&mut self.inner),
-                        _ => panic!("Only Ohua TCP sockets supported!"),
-                    };
-                if is_packet(&packet_or_ok) {
-                    let (response, response_and_keepalive) = from_packet(packet_or_ok);
-                    neighbor_addr = Some(response.ip_repr().dst_addr());
-                    packet = Some(response);
-                    currentResponse = Some(response_and_keepalive);
-                }
-            }
-            item_optn = socket_iter.next();
-        }
-        if packet.is_some() {
-            // If there is a 'first' socket that can send, we set the
-            // egress state at using the current position of the iterator
-            self.currentEgressState = Some(
-                EgressState{
-                    socketIteratorState: Box::new(socket_iter),
-                    currentSocket: item_optn,
-                    currentNeighbor:neighbor_addr,
-                    currentResponse:currentResponse
-                }
-            );
-        }
-        return packet
-    }
-
-    fn reset_egress_state(&mut self) {
-        match self.currentEgressState.take() {
-            None => panic!("Can't return none existing sockets"),
-            Some(state) => ()
-        }
-    }
 }
+
 
 impl<'a> InterfaceInner<'a> {
 
