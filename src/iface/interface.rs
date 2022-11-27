@@ -5,8 +5,7 @@
 use core::cmp;
 use std::rc::Rc;
 use core::cell::RefCell;
-use libc::socket;
-use managed::{ManagedMap, ManagedSlice, SlotIndex};
+use managed::{ManagedMap, ManagedSlice};
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 use super::fragmentation::PacketAssemblerSet;
@@ -14,7 +13,7 @@ use super::socket_set::{SocketSet, Item};
 use crate::iface::Routes;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use crate::iface::{NeighborAnswer, NeighborCache};
-use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use crate::phy::{ChecksumCapabilities, Device, DeviceCall, DeviceCapabilities, Medium, RxToken, TxToken};
 use crate::rand::Rand;
 #[cfg(feature = "socket-dhcpv4")]
 use crate::socket::dhcpv4;
@@ -24,12 +23,9 @@ use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
-use crate::Either::Right;
+
 use crate::wire::ip::{Address};
 
-
-/// Reminder : I did it here, because the inner interface needs it and we don't have a
-///         Ohua-version of it for now
 /// Structure to replace sending to a device by local 'emission'
 /// without the need to change the api otherwise
 pub struct LocalTxToken {
@@ -52,6 +48,17 @@ impl LocalTxToken {
         let buffer = self.buffer.take();
         buffer
     }
+}
+
+
+enum InterfaceCall<'call>{
+    InitEgress(SocketSet<'call>),
+    // Todo: To avoid the hassle with dyn Device::Token we use a simple ok for
+    //  now to represent the token
+    InnerDispatchLocal(Option<IpPacket<'call>>, Option<()>),
+    MatchSocketDispatchAfter,
+    UpdateEgressState(Result<()>),
+    ReturnSockets,
 }
 
 // ToDo: ReprP is just a conversion from Repr made in
@@ -207,7 +214,8 @@ pub struct Interface<'a> {
     out_packets: OutPackets<'a>,
     // We will probably replace this by a
     // State = Option<Ingress{}> | Option<Egress{}>
-    currentEgressState: Option<EgressState<'a>>
+    currentEgressState: Option<EgressState<'a>>,
+    currentSockets:Option<SocketSet<'a>>
 }
 
 
@@ -631,6 +639,7 @@ let iface = builder.finalize(&mut device);
                 rand,
             },
             currentEgressState:None,
+            currentSockets:None,
         }
     }
 }
@@ -796,10 +805,8 @@ impl<'a> Interface<'a> {
         self.inner.has_neighbor(ipaddr)
     }
 
-    fn match_socket_dispatch_before<'s>(
-        &'s mut self,
-        item:&'s mut Item)
-        -> Either<PacketTwice, Result<()>>
+    fn match_socket_dispatch_before<'s>(&'s mut self)
+                                        -> Either<PacketTwice, Result<()>>
     {
         let EgressState{
             socketIteratorState,
@@ -937,9 +944,9 @@ impl<'a> Interface<'a> {
         let (emitted_any, last_socket_result) =
             {
                 let _caps = device.capabilities();
-                let mut emitted_any = false;
-                let mut temp_canarie = Ok(());
-                let mut next_packet_or_break = self.init_egress(&mut sockets);
+                let emitted_any = false;
+                let temp_canarie = Ok(());
+                let next_packet_or_break = self.init_egress(&mut sockets);
                 self.egress_recursion(next_packet_or_break, device, emitted_any, temp_canarie)
             };
 
@@ -955,7 +962,28 @@ impl<'a> Interface<'a> {
 
     }
 
-    fn egress_recursion<'p, D>(
+    fn egress_recusion_on_call<'p, D>(
+        &mut self,
+        mut device_call: DeviceCall<'p>,
+        device: &mut D,
+        mut emitted_any: bool,
+        mut temp_canarie: Result<()>)
+        -> (bool, Result<()>) where D: for<'d> Device<'d>
+    {
+        // each time we enter the recursion,
+        // we know the interface had something to send
+        let device_result = device.process_call(device_call);
+        let iface_result = self.process_call(device_result);
+        if Either::is_left(iface_result){
+            // ToDo, emitted and canary go into the interface state
+            self.egress_recusion_on_call(iface_result.left_or_panic(), device, emitted_any, temp_canarie)
+        } else {
+            // This should return (sockets, emitted__any)
+            iface_result.right_or_panic()
+        }
+    }
+
+        fn egress_recursion<'p, D>(
         &mut self,
         mut next_packet_or_break: Option<IpPacket<'p>>,
         device: &mut D,
@@ -973,10 +1001,10 @@ impl<'a> Interface<'a> {
                         let send_result = device.consume_no_ref(timest, packet, sending_token);
                         if send_result.is_ok() {
                             // has no arguments any more since they are part of the state
-                            self.match_socket_dispatch_after();
+                            let result_inner = self.match_socket_dispatch_after();
                             emitted_any = true;
                             //result = Ok(());
-                            Ok(())
+                            result_inner
                         } else {
                             send_result
                         }
@@ -991,24 +1019,95 @@ impl<'a> Interface<'a> {
                 }
             };
             temp_canarie = result.clone();
-            next_packet_or_break = self.handle_egress_state(result);
+            next_packet_or_break = self.update_egress_state(result);
             self.egress_recursion(next_packet_or_break, device, emitted_any, temp_canarie)
         } else {
         (emitted_any, temp_canarie)
         }
     }
 
-
-    fn handle_egress_state(&self, result: Result<()>) -> Option<IpPacket>  {
-        None
+    // Essentially a call to the interface should return either a call to the
+    // device or a call to the app
+    // We don't have calls to app right now so we just use the return values
+    fn process_call<'call>(
+        &mut self,
+        call: InterfaceCall<'call>
+    ) -> Either<DeviceCall<'_>, (SocketSet<'_>, bool)>
+    {
+        match call {
+            // This is essentially the entry point for the
+            // communication with the app
+            InterfaceCall::InitEgress(sockets) => self.init_egress(&mut sockets),
+            InterfaceCall::InnerDispatchLocal(next_packet_or_break, token) => {
+                let dispatch_result = self.inner_dispatch_local(next_packet_or_break.unwrap(), None);
+                if dispatch_result.is_ok() {
+                    let (packet, timest) = dispatch_result.unwrap();
+                    return DeviceCall::Consume(timest, packet, token)
+                }
+            },
+            InterfaceCall::MatchSocketDispatchAfter => MatchInnerResult(
+                self.match_socket_dispatch_after()
+            ),
+            InterfaceCall::UpdateEgressState(result) => NextPacketOrBreak(
+                self.update_egress_state(result)
+            ),
+        }
     }
 
-    // This methods wraps loop control to the interface. Basically we do what
-    // the original loop did and spin the socket_iterator forward until we
-    // reach a socket that actually produces a packet.
-    // At that point we a) set the EgressState and b) return the packet obviously
-    // If we hit no such socket, we return None and egress is instantly over
-    fn init_egress(&mut self, sockets:&mut SocketSet) -> Option<IpPacket>{
+    fn update_egress_state(&mut self, result: Result<()>) -> Option<IpPacket> {
+        let EgressState{
+            socketIteratorState,
+            currentSocket,
+            currentNeighbor,
+            ..
+        } = self.currentEgressState.unwrap();
+
+        let should_break = self.handle_result(result, currentSocket.unwrap(), currentNeighbor);
+        if should_break {
+            return None
+        } else
+        //ToDo: This code should realy exist only once
+        // -> clean up and factor which methods the interface should actually
+        //    have based on the orginal code.
+        {
+            let mut new_packet = None;
+            let mut new_neighbor_addr = None;
+            let mut new_response = None;
+            while currentSocket.is_some() && new_packet.is_none(){
+                let item = currentSocket.unwrap();
+                if item.meta.egress_permitted(self.inner.now,
+                |ip_addr| self.inner.has_neighbor(&ip_addr)){
+                    let packet_or_ok = match &mut item.socket{
+                            Socket::OhuaTcp(socket) =>
+                                socket.dispatch_before(&mut self.inner),
+                            _ => panic!("Only Ohua TCP sockets supported!"),
+                        };
+                    if is_packet(&packet_or_ok) {
+                        let (response, response_and_keepalive) = from_packet(packet_or_ok);
+                        new_neighbor_addr = Some(response.ip_repr().dst_addr());
+                        new_packet = Some(response);
+                        new_response = Some(response_and_keepalive);
+                    }
+                }
+                currentSocket = socketIteratorState.next();
+            }
+            if new_packet.is_some() {
+                // If there is a 'next' socket that can send, we set the
+                // egress state at using the current position of the iterator
+                self.currentEgressState = Some(
+                    EgressState{
+                        socketIteratorState: Box::new(socketIteratorState),
+                        currentSocket: currentSocket,
+                        currentNeighbor: new_neighbor_addr,
+                        currentResponse: new_response
+                    }
+                );
+            }
+        return new_packet
+        }
+    }
+
+    fn init_egress(&mut self, sockets:&mut SocketSet) -> Either<DeviceCall<'_>, SocketSet>{
         let mut socket_iter = sockets.items_mut();
         let mut item_optn = socket_iter.next();
         let mut packet = None;
@@ -1043,11 +1142,15 @@ impl<'a> Interface<'a> {
                     currentResponse:currentResponse
                 }
             );
+            return Either::Left(DeviceCall::Transmit(packet))
+        } else {
+            return Either::Right(sockets)
         }
-        return packet
+
     }
 
     fn reset_egress_state(&mut self) {
+        // ToDo: Return Sockets when we realy move them
         match self.currentEgressState.take() {
             None => panic!("Can't return none existing sockets"),
             Some(state) => ()
@@ -5382,7 +5485,7 @@ mod test {
                     addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
                     port: 49500} );
         // we add a socket but no message
-        let tcp_socket_handle = sockets.add(socket);
+        let _handle = sockets.add(socket);
 
         let timestamp = Instant::now();
         let (poll_result, last_socket_egress_result, _used_sockets) =

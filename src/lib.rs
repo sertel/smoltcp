@@ -277,4 +277,14 @@ impl<L,R> Either<L,R> {
              Either::Left")
         }
     }
+    fn is_left(either: &Either<L, R>) -> bool {
+        match either {
+            Either::Left(_) => true,
+            Either::Right(_) => false
+        }
+    }
+
+    fn is_right(either: &Either<L, R>) -> bool {
+        !Either::is_left(either)
+    }
 }

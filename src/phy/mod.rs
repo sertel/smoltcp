@@ -89,6 +89,7 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
 "##
 )]
 
+use core::fmt::Debug;
 use crate::time::Instant;
 use crate::{Error, Result};
 
@@ -349,8 +350,11 @@ pub trait Device<'a> {
         &'a mut self,
         timestamp:Instant,
         packet:Vec<u8>,
-        token:Option<<Self as Device<'a>>::TxToken>) -> Result<()> {
-        token.unwrap().consume(timestamp, packet.len(),
+        token:Option<<Self as Device<'a>>::TxToken>) -> Result<()>
+    where <Self as Device<'a>>::TxToken: Debug
+    {
+        token.ok_or(
+            Err::<<Self as Device<'a>>::TxToken, Error>(Error::Exhausted)).unwrap().consume(timestamp, packet.len(),
                   |buffer| {
                       buffer.copy_from_slice(packet.as_slice());
                       Ok(())
@@ -361,15 +365,31 @@ pub trait Device<'a> {
     &'a mut self,
     timestamp:Instant,
     packet:Vec<u8>,
-    token:Option<()>) -> Result<()> {
-    let token = self
-        .transmit()
-        .ok_or(Error::Exhausted)?;
-    token.consume(timestamp, packet.len(),
-          |buffer| {
-              buffer.copy_from_slice(packet.as_slice());
-              Ok(())
-          })
+    token:Option<()>) -> Result<()>
+    {
+        let token = self
+            .transmit()
+            .ok_or(Error::Exhausted)?;
+        token.consume(timestamp, packet.len(),
+              |buffer| {
+                  buffer.copy_from_slice(packet.as_slice());
+                  Ok(())
+              })
+    }
+
+    fn process_call(
+        &'a mut self,
+        dev_call_state:DeviceCall<'a, Self>
+    ) -> InterfaceCall
+    where Self:Sized, Self::TxToken: Debug
+    {
+        match dev_call_state {
+            DeviceCall::Transmit(packet)
+                => DeviceResult::Transmit(self.transmit()),
+            DeviceCall::Consume(timestamp,packet, token_optn)
+                => DeviceResult::Consume(self.consume_token(timestamp, packet, token_optn))
+
+        }
     }
 }
 
@@ -401,4 +421,14 @@ pub trait TxToken {
     fn consume<R, F>(self, timestamp: Instant, len: usize, f: F) -> Result<R>
     where
         F: FnOnce(&mut [u8]) -> Result<R>;
+}
+
+pub enum DeviceCall<'d, D:Device<'d>>{
+    Transmit(IpPacket<'d>),
+    Consume(Instant, Vec<u8>, Option<D::TxToken>)
+}
+
+pub enum DeviceResult<'d, D:Device<'d>>{
+    Transmit(Option<D::TxToken>),
+    Consume(Result<()>)
 }
