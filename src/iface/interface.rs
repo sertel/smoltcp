@@ -51,14 +51,13 @@ impl LocalTxToken {
 }
 
 
-enum InterfaceCall<'call>{
+pub enum InterfaceCall<'call>{
     InitEgress(SocketSet<'call>),
     // Todo: To avoid the hassle with dyn Device::Token we use a simple ok for
     //  now to represent the token
-    InnerDispatchLocal(Option<IpPacket<'call>>, Option<()>),
-    MatchSocketDispatchAfter,
-    UpdateEgressState(Result<()>),
-    ReturnSockets,
+    InnerDispatchLocal(Option<()>),
+    MatchSocketDispatchAfter(Result<()>),
+    UpdateEgressState(Result<()>)
 }
 
 // ToDo: ReprP is just a conversion from Repr made in
@@ -228,9 +227,11 @@ struct EgressState<'es>{
     currentSocket:Option<&'es mut Item<'es>>,
     // we need it just once at the end of the EgressStates lifetime
     currentNeighbor:Option<Address>,
+    currentPreSendPacket: Option<IpPacket<'es>>,
     //Copy of the intermediate results, we need to take it out and pass it to
     //dispatch_after
-    currentResponse:Option< (TcpReprP, IpRepr, bool)>
+    currentPostSendPacket:Option< (TcpReprP, IpRepr, bool)>,
+    emitted_any:bool
 }
 
 /// The device independent part of an Ethernet network interface.
@@ -795,39 +796,84 @@ pub(crate) enum IgmpReportState {
 }
 
 impl<'a> Interface<'a> {
+/*
+    fn original_simple_poll<D>(
+        &mut self,
+        device: &mut D,
+        sockets: &mut SocketSet,
+        readiness_may_have_changed: bool )
+        -> (bool, Result<()>)
+        where
+        D: for<'d> Device<'d>, {
+        let processed_any = self.socket_ingress(device, sockets);
+        let (emitted_any, last_socket_result) =
+            {
+                let _caps = device.capabilities();
+                let mut emitted_any = false;
+                let mut temp_canarie = Ok(());
+                let mut maybe_break = false;
+                let mut socket_iter = sockets.items_mut();
+                let mut item_optn = socket_iter.next();
+                while !maybe_break && item_optn.is_some() {
+                    let item = item_optn.unwrap();
+                    if self.item_meta_egress_permitted(item) {
+                        let mut neighbor_addr = None;
+                        let result: Result<()> = {
+                            let packet_or_ok = self.match_socket_dispatch_before_DUMMY(item);
+                            if is_packet(&packet_or_ok) {
+                                let (response, response_and_keepalive) = from_packet(packet_or_ok);
+                                neighbor_addr = Some(response.ip_repr().dst_addr());
+                                let sending_token = device.transmit_no_ref();
+                                if sending_token.is_some() {
+                                    let local_dispatch_result = self.inner_dispatch_local_DUMMY(response, None);
+                                    if let Ok((packet, timest)) = local_dispatch_result {
+                                        let send_result = device.consume_no_ref(timest, packet, sending_token);
+                                        if send_result.is_ok() {
+                                            self.match_socket_dispatch_after_DUMMY(item, response_and_keepalive);
+                                            emitted_any = true;
+                                            //result = Ok(());
+                                            Ok(())
+                                        } else {
+                                            send_result
+                                        }
+                                    } else {
+                                        //result = dispatch_result;
+                                        Err(local_dispatch_result.unwrap_err())
+                                    }
+                                } else {
+                                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                                    //result = Err(Error::Exhausted);
+                                    Err(Error::Exhausted)
+                                }
+                            } else {
+                                //result = Ok(());
+                                Ok(())
+                            }
+                        };
+                        temp_canarie = result.clone();
+                        maybe_break = self.handle_result(result, item, neighbor_addr);
+                    }
+                    item_optn = socket_iter.next();
+                }
+            (emitted_any, temp_canarie)
+            };
+        // Also leave this out for now
+        //#[cfg(feature = "proto-igmp")]
+        //self.igmp_egress(device)?;
+
+        if processed_any || emitted_any {
+            self.simpl_poll_inner(device, sockets, true)
+        } else {
+            (readiness_may_have_changed, last_socket_result)
+        }
+
+    }
+
+ */
     //Starting here functions are wrappers
     // created during 'transormation''
     fn inner_now(&mut self) -> Instant {
         self.inner.now
-    }
-
-    fn inner_has_neighbor(&self, ipaddr:&IpAddress) -> bool {
-        self.inner.has_neighbor(ipaddr)
-    }
-
-    fn match_socket_dispatch_before<'s>(&'s mut self)
-                                        -> Either<PacketTwice, Result<()>>
-    {
-        let EgressState{
-            socketIteratorState,
-            currentSocket,
-            currentNeighbor,
-            currentResponse,
-        } = self.currentEgressState.take().unwrap();
-        let item = currentSocket.unwrap();
-        let result =match &mut item.socket{
-            Socket::OhuaTcp(socket) =>
-                socket.dispatch_before(self.context()),
-            _ => panic!("Only Ohua TCP sockets supported!"),
-        };
-        let fake_serialized_result = result.clone();
-        self.currentEgressState.replace(
-            EgressState{
-                socketIteratorState,
-                currentSocket:Some(item),
-                currentNeighbor,
-                currentResponse});
-        fake_serialized_result
     }
 
     fn match_socket_dispatch_after( &mut self) -> Result<()>
@@ -836,7 +882,9 @@ impl<'a> Interface<'a> {
             socketIteratorState,
             currentSocket,
             currentNeighbor,
-            currentResponse,
+            currentPreSendPacket,
+            currentPostSendPacket: currentResponse,
+            emitted_any
         } = self.currentEgressState.take().unwrap();
        //match &mut item.socket {
         let item = currentSocket.unwrap();
@@ -845,15 +893,18 @@ impl<'a> Interface<'a> {
                 socket.dispatch_after(self.context(), currentResponse.unwrap()),
             _ => panic!("Only Ohua TCP sockets supported!"),
         };
-        self.currentEgressState.replace(EgressState{ socketIteratorState, currentSocket:Some(item), currentNeighbor, currentResponse:None });
+        self.currentEgressState.replace(
+            EgressState{
+                socketIteratorState,
+                currentSocket:Some(item),
+                currentNeighbor,
+                currentPreSendPacket,
+                currentPostSendPacket:None,
+                emitted_any
+            });
         result.clone()
     }
 
-    fn inner_dispatch_local(&mut self, reponse: IpPacket, out_packets: Option<&mut OutPackets<'_>>,
-    ) -> Result<(Vec<u8>, Instant)> {
-        self.inner.dispatch_local(reponse, out_packets)
-    }
-    
 
     //ToDo: an item of iterating a socket set is this tuple type,
     //  but check if we can (autmatically) derive to use only the socket
@@ -891,11 +942,6 @@ impl<'a> Interface<'a> {
         should_break
     }
 
-    fn item_meta_egress_permitted(&self, item: &mut Item) -> bool {
-        item.meta.egress_permitted(
-            self.inner.now,
-            |ip_addr| self.inner.has_neighbor(&ip_addr))
-    }
 
     // this is the end of inserted wrapper functions
     /// Get the socket context.
@@ -941,13 +987,17 @@ impl<'a> Interface<'a> {
         where
         D: for<'d> Device<'d>, {
         let processed_any = self.socket_ingress(device, &mut sockets);
-        let (emitted_any, last_socket_result) =
+        // ToDo: Thread canary through again
+        let last_socket_result = Ok(());
+        let (emitted_any, sockets_after_loop) =
             {
-                let _caps = device.capabilities();
-                let emitted_any = false;
-                let temp_canarie = Ok(());
-                let next_packet_or_break = self.init_egress(&mut sockets);
-                self.egress_recursion(next_packet_or_break, device, emitted_any, temp_canarie)
+                // ToDo: This whole stuff needs to go into a `process_call` call
+                let device_call_or_return = self.process_call::<D>(InterfaceCall::InitEgress(sockets));
+                if Either::is_left(&device_call_or_return) {
+                    self.egress_recursion_on_call(device_call_or_return.left_or_panic(), device)
+                } else {
+                    device_call_or_return.right_or_panic()
+                }
             };
 
         // Also leave this out for now
@@ -955,110 +1005,113 @@ impl<'a> Interface<'a> {
         //self.igmp_egress(device)?;
 
         if processed_any || emitted_any {
-            self.simpl_poll_inner(device, sockets, true)
+            self.simpl_poll_inner(device, sockets_after_loop, true)
         } else {
-            (readiness_may_have_changed, last_socket_result, sockets)
+            (readiness_may_have_changed, last_socket_result, sockets_after_loop)
         }
 
     }
 
-    fn egress_recusion_on_call<'p, D>(
+    fn egress_recursion_on_call<D>(
         &mut self,
-        mut device_call: DeviceCall<'p>,
-        device: &mut D,
-        mut emitted_any: bool,
-        mut temp_canarie: Result<()>)
-        -> (bool, Result<()>) where D: for<'d> Device<'d>
+        device_call: DeviceCall,
+        device: &mut D)
+        -> (bool, SocketSet)
+    where D: for<'d> Device<'d>
     {
         // each time we enter the recursion,
         // we know the interface had something to send
-        let device_result = device.process_call(device_call);
-        let iface_result = self.process_call(device_result);
-        if Either::is_left(iface_result){
+        // Problem is, we can not eliminate the 'if' before the device call
+        // because while the interface is called each time after the device,
+        // the device might not be called after the interface so either we take
+        // a pointless rounndtrip, or we have a condition before calling the device.
+        let iface_call = device.process_call(device_call);
+        let device_or_app_call = self.process_call::<D>(iface_call);
+        if Either::is_left(&device_or_app_call){
             // ToDo, emitted and canary go into the interface state
-            self.egress_recusion_on_call(iface_result.left_or_panic(), device, emitted_any, temp_canarie)
+            self.egress_recursion_on_call(device_or_app_call.left_or_panic(), device)
         } else {
             // This should return (sockets, emitted__any)
-            iface_result.right_or_panic()
-        }
-    }
-
-        fn egress_recursion<'p, D>(
-        &mut self,
-        mut next_packet_or_break: Option<IpPacket<'p>>,
-        device: &mut D,
-        mut emitted_any: bool,
-        mut temp_canarie: Result<()>)
-        -> (bool, Result<()>) where D: for<'d> Device<'d>
-    {
-        if next_packet_or_break.is_some() {
-            let result = {
-                let sending_token = device.transmit_no_ref();
-                if sending_token.is_some() {
-                    let local_dispatch_result =
-                        self.inner_dispatch_local(next_packet_or_break.unwrap(), None);
-                    if let Ok((packet, timest)) = local_dispatch_result {
-                        let send_result = device.consume_no_ref(timest, packet, sending_token);
-                        if send_result.is_ok() {
-                            // has no arguments any more since they are part of the state
-                            let result_inner = self.match_socket_dispatch_after();
-                            emitted_any = true;
-                            //result = Ok(());
-                            result_inner
-                        } else {
-                            send_result
-                        }
-                    } else {
-                        //result = dispatch_result;
-                        Err(local_dispatch_result.unwrap_err())
-                    }
-                } else {
-                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                    //result = Err(Error::Exhausted);
-                    Err(Error::Exhausted)
-                }
-            };
-            temp_canarie = result.clone();
-            next_packet_or_break = self.update_egress_state(result);
-            self.egress_recursion(next_packet_or_break, device, emitted_any, temp_canarie)
-        } else {
-        (emitted_any, temp_canarie)
+            device_or_app_call.right_or_panic()
         }
     }
 
     // Essentially a call to the interface should return either a call to the
     // device or a call to the app
     // We don't have calls to app right now so we just use the return values
-    fn process_call<'call>(
+    fn process_call<'call, D>(
         &mut self,
-        call: InterfaceCall<'call>
-    ) -> Either<DeviceCall<'_>, (SocketSet<'_>, bool)>
+        call: InterfaceCall<'call>)
+        -> Either<DeviceCall, (bool, SocketSet<'_>)>
+    where
+    D: for<'d> Device<'d>,
     {
         match call {
             // This is essentially the entry point for the
             // communication with the app
-            InterfaceCall::InitEgress(sockets) => self.init_egress(&mut sockets),
-            InterfaceCall::InnerDispatchLocal(next_packet_or_break, token) => {
-                let dispatch_result = self.inner_dispatch_local(next_packet_or_break.unwrap(), None);
-                if dispatch_result.is_ok() {
-                    let (packet, timest) = dispatch_result.unwrap();
-                    return DeviceCall::Consume(timest, packet, token)
+            // ToDo: Currently init_egress also loops til it finds the first
+            //  packet. However this should be a separate method
+            InterfaceCall::InitEgress(sockets) => {
+                let packet_or_return_sockets = self.init_egress(sockets);
+                if Either::is_left(&packet_or_return_sockets) {
+                    return Either::Left(DeviceCall::Transmit())
+                } else {
+                    // otherwise there was nothing to send at all
+                    return Either::Right(packet_or_return_sockets.right_or_panic())
                 }
             },
-            InterfaceCall::MatchSocketDispatchAfter => MatchInnerResult(
-                self.match_socket_dispatch_after()
-            ),
-            InterfaceCall::UpdateEgressState(result) => NextPacketOrBreak(
-                self.update_egress_state(result)
-            ),
+            InterfaceCall::InnerDispatchLocal(sending_token) => {
+                if sending_token.is_some() {
+                    let currentPreSendPackage = self.currentEgressState.as_ref().unwrap().currentPreSendPacket.unwrap();
+                    let dispatch_result = self.inner.dispatch_local(currentPreSendPackage, None);
+                    if dispatch_result.is_ok() {
+                        let (packet, timest) = dispatch_result.unwrap();
+                        return Either::Left(DeviceCall::Consume(timest, packet, sending_token))
+                    }
+                    else {
+                        let result = Err(dispatch_result.unwrap_err());
+                        return self.process_call::<D>(
+                    InterfaceCall::UpdateEgressState(result))
+                    }
+                } else {
+                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                    let result = Err(Error::Exhausted);
+                    return self.process_call::<D>(
+                    InterfaceCall::UpdateEgressState(result))
+                }
+            },
+            InterfaceCall::MatchSocketDispatchAfter(send_result) => {
+                let result =
+                    if send_result.is_ok(){
+                        self.match_socket_dispatch_after();
+                        self.currentEgressState.as_ref().unwrap().emitted_any = true;
+                        Ok(())
+                    } else {
+                        Err(send_result.unwrap_err())
+                    };
+
+                return self.process_call::<D>(
+                    InterfaceCall::UpdateEgressState(result))
+            },
+
+            InterfaceCall::UpdateEgressState(result) => {
+                let maybe_next_packet = self.update_egress_state(result);
+                if maybe_next_packet.is_some() {
+                    // ToDo: We still send the packet pointlessly to the device -> it need to go into the Egress State.
+                    Either::Left(DeviceCall::Transmit())
+                }
+                else {
+                    Either::Right(self.reset_egress_state())}
+            }
         }
     }
 
-    fn update_egress_state(&mut self, result: Result<()>) -> Option<IpPacket> {
+    fn update_egress_state(&mut self, result: Result<()>) -> Option<()> {
         let EgressState{
-            socketIteratorState,
-            currentSocket,
+            mut socketIteratorState,
+            mut currentSocket,
             currentNeighbor,
+            emitted_any,
             ..
         } = self.currentEgressState.unwrap();
 
@@ -1099,15 +1152,21 @@ impl<'a> Interface<'a> {
                         socketIteratorState: Box::new(socketIteratorState),
                         currentSocket: currentSocket,
                         currentNeighbor: new_neighbor_addr,
-                        currentResponse: new_response
+                        currentPreSendPacket: new_packet,
+                        currentPostSendPacket: new_response,
+                        emitted_any
                     }
                 );
+                return Some(())
+            } else {
+                return None
             }
-        return new_packet
         }
     }
 
-    fn init_egress(&mut self, sockets:&mut SocketSet) -> Either<DeviceCall<'_>, SocketSet>{
+    //ToDo: This should realy just try to get the first packet
+    //      the whole EgressState fuzz should happen in process_call
+    fn init_egress(&mut self, mut sockets: SocketSet) -> Either<(), (bool, SocketSet)>{
         let mut socket_iter = sockets.items_mut();
         let mut item_optn = socket_iter.next();
         let mut packet = None;
@@ -1139,21 +1198,30 @@ impl<'a> Interface<'a> {
                     socketIteratorState: Box::new(socket_iter),
                     currentSocket: item_optn,
                     currentNeighbor:neighbor_addr,
-                    currentResponse:currentResponse
+                    currentPreSendPacket: packet,
+                    currentPostSendPacket:currentResponse,
+                    emitted_any:false
                 }
             );
-            return Either::Left(DeviceCall::Transmit(packet))
+            // We do not return the packet but safe it
+            // to the egress state until we need it
+            return Either::Left(())
         } else {
-            return Either::Right(sockets)
+            // We tried to start egress but no soclet could send anything
+            // therefore emitted_any is false
+            return Either::Right((false, sockets))
         }
 
     }
 
-    fn reset_egress_state(&mut self) {
-        // ToDo: Return Sockets when we realy move them
+    fn reset_egress_state(&mut self) -> (bool, SocketSet){
         match self.currentEgressState.take() {
             None => panic!("Can't return none existing sockets"),
-            Some(state) => ()
+            Some(_state) => {
+               let sockets = self.currentSockets.take().unwrap();
+                let emitted_any = self.currentEgressState.unwrap().emitted_any;
+                (emitted_any, sockets)
+            }
         }
     }
 
@@ -1247,7 +1315,7 @@ impl<'a> Interface<'a> {
         loop {
             let processed_any = self.socket_ingress(device, sockets);
             net_debug!("Processed any was {}", processed_any);
-            let (emitted_any, emit_canarie) = self.socket_egress(device, sockets);
+            let (emitted_any, _emit_canarie) = self.socket_egress(device, sockets);
             net_debug!("Emitted any was {}", emitted_any);
             #[cfg(feature = "proto-igmp")]
             self.igmp_egress(device)?;

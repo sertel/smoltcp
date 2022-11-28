@@ -92,6 +92,7 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
 use core::fmt::Debug;
 use crate::time::Instant;
 use crate::{Error, Result};
+use crate::iface::InterfaceCall;
 
 #[cfg(all(
     any(feature = "phy-raw_socket", feature = "phy-tuntap_interface"),
@@ -342,8 +343,13 @@ pub trait Device<'a> {
         sending_result
     }
 
-    fn transmit_no_ref(&'a self) -> Option<()> {
-        Some(())
+    fn transmit_no_token(&'a mut self) -> Option<()> {
+        if self.transmit().is_some() {
+            Some(())
+        } else {
+            None
+        }
+
     }
 
     fn consume_token(
@@ -361,7 +367,7 @@ pub trait Device<'a> {
                   })
     }
 
-    fn consume_no_ref(
+    fn consume_no_token(
     &'a mut self,
     timestamp:Instant,
     packet:Vec<u8>,
@@ -377,17 +383,19 @@ pub trait Device<'a> {
               })
     }
 
+    // ToDo: To keep it simple we currently just send around a simple Ok
+    //       instead of a token. Can this lead to requesting from one device,
+    //       while sending with another? (Not in pur code but in general)
     fn process_call(
         &'a mut self,
-        dev_call_state:DeviceCall<'a, Self>
+        dev_call_state:DeviceCall
     ) -> InterfaceCall
-    where Self:Sized, Self::TxToken: Debug
     {
         match dev_call_state {
-            DeviceCall::Transmit(packet)
-                => DeviceResult::Transmit(self.transmit()),
+            DeviceCall::Transmit()
+                => InterfaceCall::InnerDispatchLocal(self.transmit_no_token()),
             DeviceCall::Consume(timestamp,packet, token_optn)
-                => DeviceResult::Consume(self.consume_token(timestamp, packet, token_optn))
+                => InterfaceCall::MatchSocketDispatchAfter(self.consume_no_token(timestamp, packet, token_optn))
 
         }
     }
@@ -423,12 +431,7 @@ pub trait TxToken {
         F: FnOnce(&mut [u8]) -> Result<R>;
 }
 
-pub enum DeviceCall<'d, D:Device<'d>>{
-    Transmit(IpPacket<'d>),
-    Consume(Instant, Vec<u8>, Option<D::TxToken>)
-}
-
-pub enum DeviceResult<'d, D:Device<'d>>{
-    Transmit(Option<D::TxToken>),
-    Consume(Result<()>)
+pub enum DeviceCall{
+    Transmit(),
+    Consume(Instant, Vec<u8>, Option<()>)
 }
