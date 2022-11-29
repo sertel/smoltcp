@@ -4,8 +4,8 @@ mod ohua_util;
 use std::os::unix::io::RawFd;
 use defmt::debug;
 use ohua_util::init_components::{init_app_and_sockets, init_stack_and_device};
-use smoltcp::{Error,Result};
-use smoltcp::iface::{OInterface, Interface, SocketSet, poll_7_egress_ask};
+use smoltcp::{Either, Error, Result};
+use smoltcp::iface::{OInterface, Interface, SocketSet, poll_7_egress_ask, InterfaceCall};
 use smoltcp::phy::{Device, TunTapInterface, wait as phy_wait};
 use smoltcp::time::Instant;
 use crate::ohua_util::init_components::App;
@@ -51,7 +51,7 @@ fn loop_as_rec(
     let timestamp = Instant::now();
     let (poll_res, mut ip_stack_poll, device_poll, sockets_poll):
         (Result<bool>, Interface, TunTapInterface, SocketSet) =
-        poll_7_egress_ask(timestamp, ip_stack, device, sockets);
+        egress_poll(timestamp, ip_stack, device, sockets);
 
     let (should_continue, sockets_do_app_stuff): (bool, SocketSet) = app.do_app_stuff(sockets_poll, poll_res);
         
@@ -63,3 +63,61 @@ fn loop_as_rec(
     } else { () }
 }
 
+pub fn egress_poll<D>(
+    timestamp: Instant,
+    mut ip_stack: Interface,
+    device: D,
+    sockets: SocketSet,
+    ) -> (Result<bool>,Interface, D, SocketSet)
+    where
+        D: for<'d> Device<'d>,
+    {
+        let (readiness_may_have_changed,ip_stack_used, device_used, sockets_used) =
+            simpl_poll_inner(timestamp, ip_stack, device, sockets,false);
+
+        (Ok(readiness_may_have_changed), ip_stack_used, device_used, sockets_used)
+    }
+
+pub fn simpl_poll_inner<D>(
+    timestamp: Instant,
+    mut ip_stack: Interface,
+    device: D,
+    mut sockets: SocketSet,
+    readiness_may_have_changed: bool
+    ) -> (bool, Interface, D, SocketSet)
+    where D: for<'d> Device<'d>,
+{
+    ip_stack.inner.now = timestamp;
+    let processed_any = false; //self.socket_ingress(device, &mut sockets);
+    // ToDo: Thread canary through again
+    // let last_socket_result = Ok(());
+    let ((emitted_any, sockets_after_loop), ip_stack_used, device_used) = egress_recursion_on_call(ip_stack, InterfaceCall::InitEgress(sockets), device);
+
+    // Also leave this out for now
+    //#[cfg(feature = "proto-igmp")]
+    //self.igmp_egress(device)?;
+
+    if processed_any || emitted_any {
+        simpl_poll_inner(timestamp, ip_stack_used, device_used, sockets_after_loop, true)
+    } else {
+        (readiness_may_have_changed, ip_stack_used, device_used, sockets_after_loop)
+    }
+
+}
+
+fn egress_recursion_on_call<D>(
+    mut ip_stack: Interface,
+    iface_call: InterfaceCall,
+    mut device: D
+    ) -> ((bool, SocketSet), Interface, D,)
+    where D: for<'d> Device<'d>,
+    {
+        let device_call_or_return = ip_stack.process_call::<D>(iface_call);
+        if Either::is_left(&device_call_or_return){
+            let next_iface_call = device.process_call(device_call_or_return.left_or_panic());
+            egress_recursion_on_call(ip_stack, next_iface_call, device)
+        } else {
+            // This should return (sockets, emitted__any)
+            (device_call_or_return.right_or_panic(), ip_stack, device)
+        }
+    }

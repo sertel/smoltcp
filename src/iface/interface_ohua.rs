@@ -2753,7 +2753,7 @@ mod test {
         //smoltcp: egress_tcp
         let (mut iface1, mut sockets1, mut device1) = create();
 
-        let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
+        let OhuaTestSocket{socket, cx:_} = ohua_socket_established_with_endpoints(
                 // I could not enforce proto-ipv4
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
@@ -2800,7 +2800,7 @@ mod test {
         // OHUA: socket_egress_tcp
         net_debug!("Now the same procedure for Ohua");
         let (mut iface2, mut sockets2, mut device2) = create();
-        let OhuaTestSocket{socket, cx} = ohua_socket_established_with_endpoints(
+        let OhuaTestSocket{socket, cx:_} = ohua_socket_established_with_endpoints(
                 // I could not enforce proto-ipv4
                 IpEndpoint{
                     addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
