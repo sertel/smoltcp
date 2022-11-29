@@ -10,7 +10,8 @@ use smoltcp::phy::{Device, TunTapInterface, wait as phy_wait};
 use smoltcp::time::Instant;
 use crate::ohua_util::init_components::App;
 
-
+// This is just a wrapper as Ohua might not like literals
+fn should_continue() -> bool {true}
 
 fn main() {
     println!(
@@ -43,6 +44,39 @@ fn main() {
 }
 
 
+/* Target:
+--> App --> IP_Stack --> Device
+
+fn loop_as_rec(app, ip_stack, device, sockets, call) {
+     let app_or_dev_call = ip_stack.process(call);
+     let iface_call = {
+        if Either::is_left(app_or_dev_call) {
+            app.process_call(app_or_dev_call.left_or_panic())
+        } else {
+            device.process_call(app_or_dev_call.right_or_panic())
+        }
+     }
+     if should_continue() {
+        loop_as_rec(app, ip_stack, device, sockets, iface_call)
+     } else {
+        ()
+     }
+}
+
+
+*/
+
+/*
+current structure
+outer_loop {
+    timestamp = Instant::now();
+    poll_result = inner_loop(timestamp, iface, device, sockets)
+    app_result = app.do_stuff(poll_result)
+    outer_loop()
+}
+
+*/
+
 fn loop_as_rec(
     mut app:App, mut ip_stack: Interface,
     mut device:TunTapInterface, mut sockets: SocketSet<'static>,
@@ -53,12 +87,12 @@ fn loop_as_rec(
         (Result<bool>, Interface, TunTapInterface, SocketSet) =
         egress_poll(timestamp, ip_stack, device, sockets);
 
-    let (should_continue, sockets_do_app_stuff): (bool, SocketSet) = app.do_app_stuff(sockets_poll, poll_res);
+    let sockets_do_app_stuff: SocketSet = app.do_app_stuff(sockets_poll, poll_res);
         
     phy_wait(fd, ip_stack_poll.poll_delay(timestamp, &sockets_do_app_stuff)).expect("wait error");
 
 
-    if should_continue {
+    if should_continue() {
         loop_as_rec(app, ip_stack_poll, device_poll, sockets_do_app_stuff, fd)
     } else { () }
 }
@@ -72,10 +106,13 @@ pub fn egress_poll<D>(
     where
         D: for<'d> Device<'d>,
     {
-        let (readiness_may_have_changed,ip_stack_used, device_used, sockets_used) =
-            simpl_poll_inner(timestamp, ip_stack, device, sockets,false);
+        ip_stack.inner.now = timestamp;
+        let readiness_changed = false;
 
-        (Ok(readiness_may_have_changed), ip_stack_used, device_used, sockets_used)
+        let (readiness_has_changed,ip_stack_used, device_used, sockets_used) =
+            simpl_poll_inner(timestamp, ip_stack, device, sockets,readiness_changed);
+
+        (Ok(readiness_has_changed), ip_stack_used, device_used, sockets_used)
     }
 
 pub fn simpl_poll_inner<D>(
@@ -87,10 +124,8 @@ pub fn simpl_poll_inner<D>(
     ) -> (bool, Interface, D, SocketSet)
     where D: for<'d> Device<'d>,
 {
-    ip_stack.inner.now = timestamp;
+
     let processed_any = false; //self.socket_ingress(device, &mut sockets);
-    // ToDo: Thread canary through again
-    // let last_socket_result = Ok(());
     let ((emitted_any, sockets_after_loop), ip_stack_used, device_used) = egress_recursion_on_call(ip_stack, InterfaceCall::InitEgress(sockets), device);
 
     // Also leave this out for now

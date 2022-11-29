@@ -90,11 +90,12 @@ impl App {
         &mut self,
         mut sockets_obj: SocketSet<'s>,
         poll_res: Result<bool, E>)
-        -> (bool, SocketSet<'s>) {
-            match poll_res {
-                Ok(_) => {}
-                Err(e) => {
-                debug!("poll error: {}", e);
+        -> SocketSet<'s>
+    {
+        match poll_res {
+            Ok(_) => {}
+            Err(e) => {
+            debug!("poll error: {}", e);
             }
         }
         let sockets = &mut sockets_obj;
@@ -120,9 +121,7 @@ impl App {
             debug!("tcp:6969 close");
             socket.close();
         }
-        // Just make it clear -> this turns the outer recursion into an endless loop:
-        let should_continue = true;
-        (should_continue, sockets_obj)
+        sockets_obj
     }
 
     fn handle_message(&mut self, input:Vec<u8>)-> Vec<u8> {
