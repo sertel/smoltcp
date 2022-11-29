@@ -52,7 +52,9 @@ impl LocalTxToken {
 
 
 pub enum InterfaceCall{
-    InitEgress(SocketSet<'static>),
+    InitPoll(SocketSet<'static>, Instant),
+    Egress,
+    PollLoopCondition,
     // Todo: To avoid the hassle with dyn Device::Token we use a simple ok for
     //  now to represent the token
     InnerDispatchLocal(Option<()>),
@@ -214,7 +216,10 @@ pub struct Interface<'a> {
     // We will probably replace this by a
     // State = Option<Ingress{}> | Option<Egress{}>
     currentEgressState: Option<EgressState<'a>>,
-    currentSockets:Option<SocketSet<'a>>
+    currentSockets:Option<SocketSet<'a>>,
+    emitted_any:bool,
+    processed_any:bool,
+    readiness_changed:bool
 }
 
 
@@ -230,8 +235,7 @@ struct EgressState<'es>{
     currentPreSendPacket: Option<IpPacket<'es>>,
     //Copy of the intermediate results, we need to take it out and pass it to
     //dispatch_after
-    currentPostSendPacket:Option< (TcpReprP, IpRepr, bool)>,
-    emitted_any:bool
+    currentPostSendPacket:Option< (TcpReprP, IpRepr, bool)>
 }
 
 /// The device independent part of an Ethernet network interface.
@@ -641,6 +645,9 @@ let iface = builder.finalize(&mut device);
             },
             currentEgressState:None,
             currentSockets:None,
+            emitted_any: false,
+            processed_any: false,
+            readiness_changed:false,
         }
     }
 }
@@ -883,8 +890,7 @@ impl<'a> Interface<'a> {
             currentSocket,
             currentNeighbor,
             currentPreSendPacket,
-            currentPostSendPacket: currentResponse,
-            emitted_any
+            currentPostSendPacket: currentResponse
         } = self.currentEgressState.take().unwrap();
        //match &mut item.socket {
         let item = currentSocket.unwrap();
@@ -899,8 +905,7 @@ impl<'a> Interface<'a> {
                 currentSocket:Some(item),
                 currentNeighbor,
                 currentPreSendPacket,
-                currentPostSendPacket:None,
-                emitted_any
+                currentPostSendPacket:None
             });
         result.clone()
     }
@@ -965,17 +970,52 @@ impl<'a> Interface<'a> {
         match call {
             // This is essentially the entry point for the
             // communication with the app
-            InterfaceCall::InitEgress(sockets) => {
+            InterfaceCall::InitPoll(sockets, timestamp) => {
+                // This replaces the inface.poll call
+                // So we have to set the state thats 'permanent during one
+                // poll call'
+                // 1. set the timestamp
+                self.inner.now = timestamp;
+                // 2. Set Sockets
                 self.currentSockets = Some(sockets);
+                // 3. Set 'processing indicators'
+                self.emitted_any = false;
+                self.processed_any = false;
+                self.readiness_changed = false;
+                // now the original code would loop ingress and egress
+                /*
+                loop {
+                    processed_any = self.ingress()
+                    emitted_any = self.egress()
+                    if processed_any || emitted_any {
+                        readiness_changed = true;
+                    } else {
+                        break;
+                    }
+                }
+                */
+                // We can't do this obviously because we need to return another
+                // So we replace this with process_call, jumping points for
+                // all of the loops
+                // i.e. `InterFaceCall::PollLoop` -> `InterfaceCall::Ingress`
+                // -> InterfaceCall::InitEgress
+                // and InterfaceCall::UpdateEgressState will not return to the
+                // outer scope any more but to InterfaceCall::PollLoopFinal
+                // which checks current state for emitted any and processed_any
+                // and either loops back to `InterFaceCall::PollLoop` or returns
+                // the result of polling
+                // For now we don't have ingress so I'll jump ahead to Egress
+                return self.process_call::<D>(InterfaceCall::Egress)
+            },
+            InterfaceCall::Egress => {
                 self.currentEgressState = Some(EgressState{
                     socketIteratorState: Box::new(self.currentSockets.as_mut().unwrap().items_mut()),
                     currentSocket: None,
                     currentNeighbor: None,
                     currentPreSendPacket: None,
                     currentPostSendPacket: None,
-                    emitted_any: false
                 });
-                // ToDo: Handling the result annd spinning the loop
+                // ToDo: Handling the result and spinning the loop
                 //  one step froward should be separated again
                 return self.process_call::<D>(
                     InterfaceCall::UpdateEgressState(Ok(())))
@@ -983,7 +1023,7 @@ impl<'a> Interface<'a> {
             },
             InterfaceCall::InnerDispatchLocal(sending_token) => {
                 if sending_token.is_some() {
-                    let currentPreSendPackage = self.currentEgressState.as_ref().unwrap().currentPreSendPacket.unwrap();
+                    let currentPreSendPackage = self.currentEgressState.as_mut().unwrap().currentPreSendPacket.take().unwrap();
                     let dispatch_result = self.inner.dispatch_local(currentPreSendPackage, None);
                     if dispatch_result.is_ok() {
                         let (packet, timest) = dispatch_result.unwrap();
@@ -1001,12 +1041,13 @@ impl<'a> Interface<'a> {
                     InterfaceCall::UpdateEgressState(result))
                 }
             },
+
             InterfaceCall::MatchSocketDispatchAfter(send_result) => {
                 let result =
                     if send_result.is_ok(){
-                        self.match_socket_dispatch_after();
-                        self.currentEgressState.unwrap().emitted_any = true;
-                        Ok(())
+                        let final_result = self.match_socket_dispatch_after();
+                        self.emitted_any = true;
+                        final_result
                     } else {
                         Err(send_result.unwrap_err())
                     };
@@ -1016,14 +1057,32 @@ impl<'a> Interface<'a> {
             },
 
             InterfaceCall::UpdateEgressState(result) => {
+                // This combines the first and the last part of the egress loop
+                // update_egress state first checks the result of the previous
+                // loop. If the loop should continue, it spins the 'while loop'
+                // over the sockets until it finds onde that can send and produces
+                // a packet. If it has a new packet it updates the egress state
+                // to hold the current socket and the packet until we need it
                 let maybe_next_packet = self.update_egress_state(result);
                 if maybe_next_packet.is_some() {
-                    // ToDo: We still send the packet pointlessly to the device -> it need to go into the Egress State.
-                    Either::Left(DeviceCall::Transmit())
+                    // we remain in the egress loop
+                    return Either::Left(DeviceCall::Transmit())
                 }
                 else {
-                    Either::Right(self.reset_egress_state())}
+                    //we return to the poll loop
+                    return self.process_call::<D>(InterfaceCall::PollLoopCondition)
+                }
             }
+            InterfaceCall::PollLoopCondition => {
+                if self.emitted_any || self.processed_any {
+                    // ToDo: Replace with Ingress once have a loop over both.
+                    self.readiness_changed = true;
+                    self.process_call::<D>(InterfaceCall::Egress)
+                } else {
+                    return Either::Right((self.readiness_changed, self.reset_egress_state()))
+                }
+            }
+
         }
     }
 
@@ -1032,18 +1091,13 @@ impl<'a> Interface<'a> {
             mut socketIteratorState,
             mut currentSocket,
             currentNeighbor,
-            emitted_any,
             ..
-        } = self.currentEgressState.unwrap();
+        } = self.currentEgressState.take().unwrap();
 
         let should_break = self.handle_result(result, currentSocket.unwrap(), currentNeighbor);
         if should_break {
             return None
-        } else
-        //ToDo: This code should realy exist only once
-        // -> clean up and factor which methods the interface should actually
-        //    have based on the orginal code.
-        {
+        } else {
             let mut new_packet = None;
             let mut new_neighbor_addr = None;
             let mut new_response = None;
@@ -1075,7 +1129,6 @@ impl<'a> Interface<'a> {
                         currentNeighbor: new_neighbor_addr,
                         currentPreSendPacket: new_packet,
                         currentPostSendPacket: new_response,
-                        emitted_any
                     }
                 );
                 return Some(())
@@ -1086,13 +1139,13 @@ impl<'a> Interface<'a> {
     }
 
 
-    fn reset_egress_state(&mut self) -> (bool, SocketSet){
+    fn reset_egress_state(&mut self) -> SocketSet{
+        // this basically ensures that EgressState is None afterwards
         match self.currentEgressState.take() {
             None => panic!("Can't return none existing sockets"),
             Some(_state) => {
                let sockets = self.currentSockets.take().unwrap();
-                let emitted_any = self.currentEgressState.unwrap().emitted_any;
-                (emitted_any, sockets)
+               sockets
             }
         }
     }

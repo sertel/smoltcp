@@ -3,6 +3,7 @@ mod ohua_util;
 
 use std::os::unix::io::RawFd;
 use defmt::debug;
+use libc::time;
 use ohua_util::init_components::{init_app_and_sockets, init_stack_and_device};
 use smoltcp::{Either, Error, Result};
 use smoltcp::iface::{OInterface, Interface, SocketSet, poll_7_egress_ask, InterfaceCall};
@@ -29,7 +30,7 @@ fn main() {
      \/__/         \/__/         \/__/         \/__/                  \|__|
 "#
     );
-    let (mut app, mut sockets):(App, SocketSet<'static>) = init_app_and_sockets();
+    let (mut app, mut sockets):(App, SocketSet) = init_app_and_sockets();
     let (mut ip_stack, mut device, fd):(Interface, TunTapInterface, RawFd) = init_stack_and_device();
 
 // ToDo: Currently we send around the actual SocketSet
@@ -77,6 +78,19 @@ outer_loop {
 
 */
 
+// The timestamp is taken every time before we call poll, and then
+// set in the inner interface
+// The same timestamp is used in each round to call poll_delay
+// which again sets the inner.now value to that same timestamp
+// The problem is, that poll_delay takes thi sockets after they have
+// been altered by the app
+// so poll_delay is called with sockets from the 'next call' and timestamp from
+// the current call (or current and last respectively)
+// This means we can call poll_delay before we process the sockets. But we
+/// can not 'wait' inside the interface because `phy_wait()` uses a
+/// file descriptor to check when the device is available. I don't know how
+/// we can realize this in M3.
+
 fn loop_as_rec(
     mut app:App, mut ip_stack: Interface,
     mut device:TunTapInterface, mut sockets: SocketSet<'static>,
@@ -106,53 +120,29 @@ pub fn egress_poll<D>(
     where
         D: for<'d> Device<'d>,
     {
-        ip_stack.inner.now = timestamp;
-        let readiness_changed = false;
-
-        let (readiness_has_changed,ip_stack_used, device_used, sockets_used) =
-            simpl_poll_inner(timestamp, ip_stack, device, sockets,readiness_changed);
+       let ((readiness_has_changed, sockets_used), ip_stack_used, device_used) = poll_recursion_on_call(ip_stack, InterfaceCall::InitPoll(sockets, timestamp), device);
 
         (Ok(readiness_has_changed), ip_stack_used, device_used, sockets_used)
     }
 
-pub fn simpl_poll_inner<D>(
-    timestamp: Instant,
-    mut ip_stack: Interface,
-    device: D,
-    mut sockets: SocketSet,
-    readiness_may_have_changed: bool
-    ) -> (bool, Interface, D, SocketSet)
-    where D: for<'d> Device<'d>,
-{
-
-    let processed_any = false; //self.socket_ingress(device, &mut sockets);
-    let ((emitted_any, sockets_after_loop), ip_stack_used, device_used) = egress_recursion_on_call(ip_stack, InterfaceCall::InitEgress(sockets), device);
-
-    // Also leave this out for now
-    //#[cfg(feature = "proto-igmp")]
-    //self.igmp_egress(device)?;
-
-    if processed_any || emitted_any {
-        simpl_poll_inner(timestamp, ip_stack_used, device_used, sockets_after_loop, true)
-    } else {
-        (readiness_may_have_changed, ip_stack_used, device_used, sockets_after_loop)
-    }
-
-}
-
-fn egress_recursion_on_call<D>(
+// this is currently just the outer poll loop + the egress loop
+// Todo: The inner workings of interface.process_call need to be changeed to also include
+//       poll loop + (ingress loop + egress loop). However this function will not change
+//       as it merely distinguishes whether or not to keep looping between
+//       interface and device.
+fn poll_recursion_on_call<D>(
     mut ip_stack: Interface,
     iface_call: InterfaceCall,
     mut device: D
-    ) -> ((bool, SocketSet), Interface, D,)
+    ) -> ((bool, SocketSet), Interface, D)
     where D: for<'d> Device<'d>,
     {
         let device_call_or_return = ip_stack.process_call::<D>(iface_call);
         if Either::is_left(&device_call_or_return){
             let next_iface_call = device.process_call(device_call_or_return.left_or_panic());
-            egress_recursion_on_call(ip_stack, next_iface_call, device)
+            poll_recursion_on_call(ip_stack, next_iface_call, device)
         } else {
-            // This should return (sockets, emitted__any)
+            // return = (processed_any, sockets)
             (device_call_or_return.right_or_panic(), ip_stack, device)
         }
     }
