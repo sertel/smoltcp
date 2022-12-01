@@ -1101,8 +1101,9 @@ impl<'a> Interface<'a> {
             let mut new_packet = None;
             let mut new_neighbor_addr = None;
             let mut new_response = None;
-            while currentSocket.is_some() && new_packet.is_none(){
-                let item = currentSocket.unwrap();
+            let mut new_socket = socketIteratorState.next();
+            while new_socket.is_some() && new_packet.is_none(){
+                let item = new_socket.unwrap();
                 if item.meta.egress_permitted(self.inner.now,
                 |ip_addr| self.inner.has_neighbor(&ip_addr)){
                     let packet_or_ok = match &mut item.socket{
@@ -1117,7 +1118,7 @@ impl<'a> Interface<'a> {
                         new_response = Some(response_and_keepalive);
                     }
                 }
-                currentSocket = socketIteratorState.next();
+                new_socket = socketIteratorState.next();
             }
             if new_packet.is_some() {
                 // If there is a 'next' socket that can send, we set the
@@ -1125,7 +1126,7 @@ impl<'a> Interface<'a> {
                 self.currentEgressState = Some(
                     EgressState{
                         socketIteratorState: Box::new(socketIteratorState),
-                        currentSocket: currentSocket,
+                        currentSocket: new_socket,
                         currentNeighbor: new_neighbor_addr,
                         currentPreSendPacket: new_packet,
                         currentPostSendPacket: new_response,
@@ -1137,6 +1138,7 @@ impl<'a> Interface<'a> {
             }
         }
     }
+
 
 
     fn reset_egress_state(&mut self) -> SocketSet{
