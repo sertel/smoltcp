@@ -9,8 +9,8 @@ use managed::{ManagedMap, ManagedSlice};
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 use super::fragmentation::PacketAssemblerSet;
-use super::socket_set::{SocketSet, Item};
-use crate::iface::Routes;
+use super::socket_set::{SocketSet};
+use crate::iface::{Routes};
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use crate::iface::{NeighborAnswer, NeighborCache};
 use crate::phy::{ChecksumCapabilities, Device, DeviceCall, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -53,13 +53,17 @@ impl LocalTxToken {
 
 pub enum InterfaceCall{
     InitPoll(SocketSet<'static>, Instant),
-    Egress,
+    InitEgress,
     PollLoopCondition,
     // Todo: To avoid the hassle with dyn Device::Token we use a simple ok for
     //  now to represent the token
     InnerDispatchLocal(Option<()>),
+    // takes the DeviceResult
     MatchSocketDispatchAfter(Result<()>),
-    UpdateEgressState(Result<()>)
+    // takes the emit result of the current socket
+    HandleResult(Result<()>),
+    // iterates to nex socket & packet
+    UpdateEgressState
 }
 
 // ToDo: ReprP is just a conversion from Repr made in
@@ -224,12 +228,12 @@ pub struct Interface<'a> {
 
 
 struct EgressState<'es>{
-    //maybe we don't need the sockets but only the iterator
-    //sockets:&'es mut SocketSet<'es>,
-    //
-    socketIteratorState: Box<dyn std::iter::Iterator<Item = &'es mut Item<'es>>>,
+    // We keep the interfaces sockets here during egress to mimic
+    // the situation that the socket reference would be borrowed during egress
+    // and becomes usable in  poll afterward
+    socketsDuringEgress: Option<SocketSet<'es>>,
     // We need to reuse it, doesn't live as long as the other refs
-    currentSocket:Option<&'es mut Item<'es>>,
+    currentHandle:usize,
     // we need it just once at the end of the EgressStates lifetime
     currentNeighbor:Option<Address>,
     currentPreSendPacket: Option<IpPacket<'es>>,
@@ -885,27 +889,30 @@ impl<'a> Interface<'a> {
 
     fn match_socket_dispatch_after( &mut self) -> Result<()>
     {
+        //
         let EgressState{
-            socketIteratorState,
-            currentSocket,
+            mut socketsDuringEgress,
+            currentHandle: handle,
             currentNeighbor,
             currentPreSendPacket,
             currentPostSendPacket: currentResponse
         } = self.currentEgressState.take().unwrap();
-       //match &mut item.socket {
-        let item = currentSocket.unwrap();
+
+        let sockets_as_in_original_code = socketsDuringEgress.as_mut().unwrap();
+        let item = sockets_as_in_original_code.get_mut_item(handle).unwrap();
         let result = match &mut item.socket{
-            Socket::OhuaTcp(socket) =>
-                socket.dispatch_after(self.context(), currentResponse.unwrap()),
+            Socket::OhuaTcp(socket) => {
+               socket.dispatch_after(self.context(), currentResponse.unwrap())
+            },
             _ => panic!("Only Ohua TCP sockets supported!"),
         };
         self.currentEgressState.replace(
             EgressState{
-                socketIteratorState,
-                currentSocket:Some(item),
+                socketsDuringEgress,
+                currentHandle: handle,
                 currentNeighbor,
                 currentPreSendPacket,
-                currentPostSendPacket:None
+                currentPostSendPacket: None,
             });
         result.clone()
     }
@@ -913,12 +920,18 @@ impl<'a> Interface<'a> {
 
     //ToDo: an item of iterating a socket set is this tuple type,
     //  but check if we can (autmatically) derive to use only the socket
-    fn handle_result(&mut self, result:Result<()>,
-                     item: &mut Item, neighbor_addr: Option<Address>) -> bool
+    fn handle_result(&mut self, result:Result<()>) -> bool
     {
-        // This is a little clumbbsy but I think automatic wrapping of
-        // matches should assign the arms to something and return that
-        // not sure how we would derive in this case
+        let EgressState{
+            mut socketsDuringEgress,
+            currentHandle,
+            currentNeighbor,
+            currentPreSendPacket,
+            currentPostSendPacket
+        } = self.currentEgressState.take().unwrap();
+
+        let item = socketsDuringEgress.as_mut().unwrap().get_mut_item(currentHandle).unwrap();
+        let neighbor_addr = currentNeighbor;
 
         let should_break;
         match result {
@@ -944,6 +957,14 @@ impl<'a> Interface<'a> {
             }
             Ok(()) => should_break=false,
         }
+        self.currentEgressState.replace(
+            EgressState{
+            socketsDuringEgress,
+            currentHandle,
+            currentNeighbor:None,
+            currentPreSendPacket,
+            currentPostSendPacket
+        });
         should_break
     }
 
@@ -961,7 +982,7 @@ impl<'a> Interface<'a> {
     // device or a call to the app
     // We don't have calls to app right now so we just use the return values
     pub fn process_call<D>(
-        &mut self,
+        &'static mut self,
         call: InterfaceCall)
         -> Either<DeviceCall, (bool, SocketSet<'_>)>
     where
@@ -1005,12 +1026,14 @@ impl<'a> Interface<'a> {
                 // and either loops back to `InterFaceCall::PollLoop` or returns
                 // the result of polling
                 // For now we don't have ingress so I'll jump ahead to Egress
-                return self.process_call::<D>(InterfaceCall::Egress)
+                return self.process_call::<D>(InterfaceCall::InitEgress)
             },
-            InterfaceCall::Egress => {
+            InterfaceCall::InitEgress => {
                 self.currentEgressState = Some(EgressState{
-                    socketIteratorState: Box::new(self.currentSockets.as_mut().unwrap().items_mut()),
-                    currentSocket: None,
+                    // When we call egress, there must be sockets available
+                    // and meanwhile those sockets must not be available otherwise
+                    socketsDuringEgress: self.currentSockets.take(),
+                    currentHandle: 0,
                     currentNeighbor: None,
                     currentPreSendPacket: None,
                     currentPostSendPacket: None,
@@ -1018,7 +1041,7 @@ impl<'a> Interface<'a> {
                 // ToDo: Handling the result and spinning the loop
                 //  one step froward should be separated again
                 return self.process_call::<D>(
-                    InterfaceCall::UpdateEgressState(Ok(())))
+                    InterfaceCall::UpdateEgressState)
 
             },
             InterfaceCall::InnerDispatchLocal(sending_token) => {
@@ -1027,18 +1050,18 @@ impl<'a> Interface<'a> {
                     let dispatch_result = self.inner.dispatch_local(currentPreSendPackage, None);
                     if dispatch_result.is_ok() {
                         let (packet, timest) = dispatch_result.unwrap();
-                        return Either::Left(DeviceCall::Consume(timest, packet, sending_token))
+                        return Either::Left(DeviceCall::Consume(timest, packet))
                     }
                     else {
                         let result = Err(dispatch_result.unwrap_err());
                         return self.process_call::<D>(
-                    InterfaceCall::UpdateEgressState(result))
+                    InterfaceCall::HandleResult(result))
                     }
                 } else {
                     net_debug!("failed to transmit IP: {}", Error::Exhausted);
                     let result = Err(Error::Exhausted);
                     return self.process_call::<D>(
-                    InterfaceCall::UpdateEgressState(result))
+                    InterfaceCall::HandleResult(result))
                 }
             },
 
@@ -1053,23 +1076,38 @@ impl<'a> Interface<'a> {
                     };
 
                 return self.process_call::<D>(
-                    InterfaceCall::UpdateEgressState(result))
+                    InterfaceCall::HandleResult(result))
             },
-
-            InterfaceCall::UpdateEgressState(result) => {
+            InterfaceCall::HandleResult(result) => {
+                let should_break = self.handle_result(result);
+                if should_break {
+                    // If the egress loop ends, we return to the poll loop
+                    // and give back the sockets
+                    let EgressState{ socketsDuringEgress, ..} = self.currentEgressState.take().unwrap();
+                    self.currentSockets = Some(socketsDuringEgress.unwrap());
+                    self.process_call::<D>(InterfaceCall::PollLoopCondition)
+                } else {
+                    self.process_call::<D>(InterfaceCall::UpdateEgressState)
+                }
+            },
+            InterfaceCall::UpdateEgressState => {
                 // This combines the first and the last part of the egress loop
                 // update_egress state first checks the result of the previous
                 // loop. If the loop should continue, it spins the 'while loop'
                 // over the sockets until it finds onde that can send and produces
                 // a packet. If it has a new packet it updates the egress state
                 // to hold the current socket and the packet until we need it
-                let maybe_next_packet = self.update_egress_state(result);
+                let maybe_next_packet = self.iterate_to_next_send();
                 if maybe_next_packet.is_some() {
                     // we remain in the egress loop
                     return Either::Left(DeviceCall::Transmit())
                 }
                 else {
-                    //we return to the poll loop
+                    // we return to the poll loop
+                    // so we need to give the sockets back to the Interface and
+                    // remove the EgressState
+                    let EgressState{ socketsDuringEgress, ..} = self.currentEgressState.take().unwrap();
+                    self.currentSockets = Some(socketsDuringEgress.unwrap());
                     return self.process_call::<D>(InterfaceCall::PollLoopCondition)
                 }
             }
@@ -1077,70 +1115,75 @@ impl<'a> Interface<'a> {
                 if self.emitted_any || self.processed_any {
                     // ToDo: Replace with Ingress once have a loop over both.
                     self.readiness_changed = true;
-                    self.process_call::<D>(InterfaceCall::Egress)
+                    self.process_call::<D>(InterfaceCall::InitEgress)
                 } else {
-                    return Either::Right((self.readiness_changed, self.reset_egress_state()))
+                    return Either::Right((self.readiness_changed, self.currentSockets.take().unwrap()))
                 }
             }
 
         }
     }
 
-    fn update_egress_state(&mut self, result: Result<()>) -> Option<()> {
+    fn iterate_to_next_send(&mut self) -> Option<()> {
         let EgressState{
-            mut socketIteratorState,
-            mut currentSocket,
-            currentNeighbor,
+            mut socketsDuringEgress,
+            currentHandle: handle,
             ..
         } = self.currentEgressState.take().unwrap();
+        let Self {
+            inner,
+            out_packets: _out_packets,
+            ..
+        } = self;
 
-        let should_break = self.handle_result(result, currentSocket.unwrap(), currentNeighbor);
-        if should_break {
-            return None
-        } else {
-            let mut new_packet = None;
-            let mut new_neighbor_addr = None;
-            let mut new_response = None;
-            let mut new_socket = socketIteratorState.next();
-            while new_socket.is_some() && new_packet.is_none(){
-                let item = new_socket.unwrap();
-                if item.meta.egress_permitted(self.inner.now,
-                |ip_addr| self.inner.has_neighbor(&ip_addr)){
-                    let packet_or_ok = match &mut item.socket{
-                            Socket::OhuaTcp(socket) =>
-                                socket.dispatch_before(&mut self.inner),
-                            _ => panic!("Only Ohua TCP sockets supported!"),
-                        };
-                    if is_packet(&packet_or_ok) {
-                        let (response, response_and_keepalive) = from_packet(packet_or_ok);
-                        new_neighbor_addr = Some(response.ip_repr().dst_addr());
-                        new_packet = Some(response);
-                        new_response = Some(response_and_keepalive);
-                    }
+        // We get to this method either the first time we enter the egress loop
+        // or at the end of another egress loop, when we try to get a new packet
+        // to send. In the former case, there is no prevouse socket and the
+        // result is pointless so we we do not need to check for break
+
+        let mut new_packet = None;
+        let mut neighbor_addr = None;
+        let mut new_response = None;
+        let mut next_handle = handle + 1;
+        {
+            let mut sockets = socketsDuringEgress.as_mut().unwrap();
+            let max_index = sockets.size().clone();
+            while let Some(item)  = sockets.get_mut_item(next_handle) {
+                if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
+                    continue;
                 }
-                new_socket = socketIteratorState.next();
+                let packet_or_ok = match &mut item.socket {
+                    Socket::OhuaTcp(socket) => socket.dispatch_before(inner),
+                    _ => panic!("Only Ohua TCP sockets supported!"),
+                };
+                if is_packet(&packet_or_ok) {
+                    let (response_tpl, response_and_keepalive) = packet_or_ok.left_or_panic();
+                    let response = IpPacket::Tcp(response_tpl);
+                    neighbor_addr = Some(response.ip_repr().dst_addr());
+                    new_packet = Some(response);
+                    new_response = Some(response_and_keepalive);
+                    break
+                }
+                next_handle += 1;
             }
-            if new_packet.is_some() {
-                // If there is a 'next' socket that can send, we set the
-                // egress state at using the current position of the iterator
-                self.currentEgressState = Some(
-                    EgressState{
-                        socketIteratorState: Box::new(socketIteratorState),
-                        currentSocket: new_socket,
-                        currentNeighbor: new_neighbor_addr,
-                        currentPreSendPacket: new_packet,
-                        currentPostSendPacket: new_response,
-                    }
-                );
-                return Some(())
-            } else {
-                return None
-            }
+        }
+        let egress_continues = new_packet.is_some();
+        self.currentEgressState.replace(
+            EgressState{
+                    socketsDuringEgress: socketsDuringEgress,
+                    currentHandle: next_handle,
+                    currentNeighbor: neighbor_addr,
+                    currentPreSendPacket: new_packet,
+                    currentPostSendPacket: new_response,
+                });
+        if egress_continues {
+            return Some(())
+        } else {
+            return None
         }
     }
 
-
-
+/*
     fn reset_egress_state(&mut self) -> SocketSet{
         // this basically ensures that EgressState is None afterwards
         match self.currentEgressState.take() {
@@ -1152,12 +1195,13 @@ impl<'a> Interface<'a> {
         }
     }
 
-
+ */
+    /*
     fn early_return_fragment_stuff<D>(&mut self, timestamp: Instant, device: &mut D)
     where
         D: for<'d> Device<'d>,
     {
-        /*
+
         #[cfg(feature = "proto-ipv4-fragmentation")]
         if let Err(e) = self
             .fragments
@@ -1181,9 +1225,9 @@ impl<'a> Interface<'a> {
             Ok(true) => return Ok(true),
             Err(e) => return Err(e),
             _ => (),
-        }*/
+        }
     }
-
+*/
     /// Transmit packets queued in the given sockets, and receive packets queued
     /// in the device.
     ///

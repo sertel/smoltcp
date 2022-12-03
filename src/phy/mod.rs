@@ -370,8 +370,7 @@ pub trait Device<'a> {
     fn consume_no_token(
     &'a mut self,
     timestamp:Instant,
-    packet:Vec<u8>,
-    token:Option<()>) -> Result<()>
+    packet:Vec<u8>) -> Result<()>
     {
         let token = self
             .transmit()
@@ -394,8 +393,8 @@ pub trait Device<'a> {
         match dev_call_state {
             DeviceCall::Transmit()
                 => InterfaceCall::InnerDispatchLocal(self.transmit_no_token()),
-            DeviceCall::Consume(timestamp,packet, token_optn)
-                => InterfaceCall::MatchSocketDispatchAfter(self.consume_no_token(timestamp, packet, token_optn))
+            DeviceCall::Consume(timestamp,packet)
+                => InterfaceCall::MatchSocketDispatchAfter(self.consume_no_token(timestamp, packet))
 
         }
     }
@@ -433,5 +432,5 @@ pub trait TxToken {
 
 pub enum DeviceCall{
     Transmit(),
-    Consume(Instant, Vec<u8>, Option<()>)
+    Consume(Instant, Vec<u8>)
 }

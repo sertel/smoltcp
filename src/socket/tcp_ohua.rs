@@ -326,14 +326,14 @@ impl Display for Tuple {
 /// accept several connections, as many sockets must be allocated, or any new connection
 /// attempts will be reset.
 #[derive(Debug)]
-pub struct OhuaTcpSocket<'a> {
+pub struct OhuaTcpSocket<'socket> {
     state: State,
     timer: Timer,
     rtte: RttEstimator,
     assembler: Assembler,
-    rx_buffer: SocketBuffer<'a>,
+    rx_buffer: SocketBuffer<'socket>,
     rx_fin_received: bool,
-    tx_buffer: SocketBuffer<'a>,
+    tx_buffer: SocketBuffer<'socket>,
     /// Interval after which, if no inbound packets are received, the connection is aborted.
     timeout: Option<Duration>,
     /// Interval at which keep-alive packets will be sent.
@@ -401,12 +401,12 @@ pub struct OhuaTcpSocket<'a> {
 
 const DEFAULT_MSS: usize = 536;
 
-impl<'a> OhuaTcpSocket<'a> {
+impl<'socket> OhuaTcpSocket<'socket> {
     #[allow(unused_comparisons)] // small usize platforms always pass rx_capacity check
     /// Create a socket using the given buffers.
-    pub fn new<T>(rx_buffer: T, tx_buffer: T) -> OhuaTcpSocket<'a>
+    pub fn new<T>(rx_buffer: T, tx_buffer: T) -> OhuaTcpSocket<'socket>
     where
-        T: Into<SocketBuffer<'a>>,
+        T: Into<SocketBuffer<'socket>>,
     {
         let (rx_buffer, tx_buffer) = (rx_buffer.into(), tx_buffer.into());
         let rx_capacity = rx_buffer.capacity();
@@ -942,7 +942,7 @@ impl<'a> OhuaTcpSocket<'a> {
 
     fn send_impl<'b, F, R>(&'b mut self, f: F) -> Result<R, SendError>
     where
-        F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R),
+        F: FnOnce(&'b mut SocketBuffer<'socket>) -> (usize, R),
     {
         if !self.may_send() {
             return Err(SendError::InvalidState);
@@ -1009,7 +1009,7 @@ impl<'a> OhuaTcpSocket<'a> {
 
     fn recv_impl<'b, F, R>(&'b mut self, f: F) -> Result<R, RecvError>
     where
-        F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R),
+        F: FnOnce(&'b mut SocketBuffer<'socket>) -> (usize, R),
     {
         self.recv_error_check()?;
 
@@ -2197,9 +2197,9 @@ impl<'a> OhuaTcpSocket<'a> {
     // what we would derive automatically
     // Yet I do not want to implement it again and I'm note sure if I'll need
     // the old one so here's just a wrapper for now
-    pub(crate) fn dispatch_before(
-        &mut self, cx: &mut Context
-    ) -> Either<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool)), Result<(), Error>> {
+    pub(crate) fn dispatch_before<'packet, 's:'packet >(
+        &'s mut self, cx: & mut Context
+    ) -> Either<((IpRepr, TcpRepr<'packet>), (TcpReprP, IpRepr, bool)), Result<(), Error>> {
         let result_optn = self.dispatch_before_optn(cx);
         match result_optn {
             None => Either::Right(Ok(())),
@@ -2652,14 +2652,14 @@ impl<'a> OhuaTcpSocket<'a> {
 
 
 // TODO What is the proper way to make this work without explicitly threading the socket?
-// The problem was that this function require an explict lifetime of 'a for the mutable borrow:
-// pub(crate) fn dispatch_c<'a>(socket: &'a mut OhuaTcpSocket<'a>, cx: &Context, d: Call<'a>) -> Results<'a> 
+// The problem was that this function require an explict lifetime of 'socket for the mutable borrow:
+// pub(crate) fn dispatch_c<'socket>(socket: &'socket mut OhuaTcpSocket<'socket>, cx: &Context, d: Call<'socket>) -> Results<'socket>
 // As a result, in the code that calls this function, I could not pass the borrowed socket on to
 // the recursive call.
 // I couldn't even get it fixed when state threading:
 // I suppose the only way to fix this would be to completely remove the borrowing.
 // #[cfg(feature = "ohua")]
-// pub fn dispatch_c<'a>(socket:&'a mut OhuaTcpSocket<'a>, cx: &Context, d: Call) -> Results<'a> {
+// pub fn dispatch_c<'socket>(socket:&'socket mut OhuaTcpSocket<'socket>, cx: &Context, d: Call) -> Results<'socket> {
 //     match d {
 //         Call::Pre => Results::Pre(socket.dispatch_before(cx)),
 //         Call::Post(tcp_repr, is_keep_alive) => {
@@ -2682,7 +2682,7 @@ pub enum DispatchCall {
 }
 
 
-impl<'a> fmt::Write for OhuaTcpSocket<'a> {
+impl<'socket> fmt::Write for OhuaTcpSocket<'socket> {
     fn write_str(&mut self, slice: &str) -> fmt::Result {
         let slice = slice.as_bytes();
         if self.send_slice(slice) == Ok(slice.len()) {

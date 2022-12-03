@@ -3,7 +3,6 @@ mod ohua_util;
 
 use std::os::unix::io::RawFd;
 use defmt::debug;
-use libc::time;
 use ohua_util::init_components::{init_app_and_sockets, init_stack_and_device};
 use smoltcp::{Either, Error, Result};
 use smoltcp::iface::{OInterface, Interface, SocketSet, poll_7_egress_ask, InterfaceCall};
@@ -31,7 +30,7 @@ fn main() {
 "#
     );
     let (mut app, mut sockets):(App, SocketSet) = init_app_and_sockets();
-    let (mut ip_stack, mut device, fd):(Interface, TunTapInterface, RawFd) = init_stack_and_device();
+    let (mut ip_stack, mut device, fd):(Interface<'static>, TunTapInterface, RawFd) = init_stack_and_device();
 
 // ToDo: Currently we send around the actual SocketSet
 //       -> this will not work out of the box, as SocketSet and the Sockets do
@@ -92,8 +91,8 @@ outer_loop {
 /// we can realize this in M3.
 
 fn loop_as_rec(
-    mut app:App, mut ip_stack: Interface,
-    mut device:TunTapInterface, mut sockets: SocketSet<'static>,
+    mut app:App, mut ip_stack: Interface<'static>,
+    mut device:TunTapInterface, mut sockets: SocketSet<'_>,
     fd:RawFd)  -> ()
     {
     let timestamp = Instant::now();
@@ -113,7 +112,7 @@ fn loop_as_rec(
 
 pub fn egress_poll<D>(
     timestamp: Instant,
-    mut ip_stack: Interface,
+    mut ip_stack: Interface<'static>,
     device: D,
     sockets: SocketSet,
     ) -> (Result<bool>,Interface, D, SocketSet)
