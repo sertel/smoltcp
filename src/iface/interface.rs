@@ -1145,32 +1145,31 @@ impl<'a> Interface<'a> {
         let mut neighbor_addr = None;
         let mut new_response = None;
         let mut next_handle = handle + 1;
-        {
-            let mut sockets = socketsDuringEgress.as_mut().unwrap();
-            let max_index = sockets.size().clone();
-            while let Some(item)  = sockets.get_mut_item(next_handle) {
-                if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
-                    continue;
-                }
-                let packet_or_ok = match &mut item.socket {
-                    Socket::OhuaTcp(socket) => socket.dispatch_before(inner),
-                    _ => panic!("Only Ohua TCP sockets supported!"),
-                };
-                if is_packet(&packet_or_ok) {
-                    let (response_tpl, response_and_keepalive) = packet_or_ok.left_or_panic();
-                    let response = IpPacket::Tcp(response_tpl);
-                    neighbor_addr = Some(response.ip_repr().dst_addr());
-                    new_packet = Some(response);
-                    new_response = Some(response_and_keepalive);
-                    break
-                }
-                next_handle += 1;
+
+        let mut sockets = socketsDuringEgress.unwrap();
+        let max_index = sockets.size().clone();
+        while let Some(item)  = sockets.get_mut_item(next_handle) {
+            if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
+                continue;
             }
+            let packet_or_ok = match &mut item.socket {
+                Socket::OhuaTcp(socket) => socket.dispatch_before(inner),
+                _ => panic!("Only Ohua TCP sockets supported!"),
+            };
+            if is_packet(&packet_or_ok) {
+                let (response_tpl, response_and_keepalive) = packet_or_ok.left_or_panic();
+                let response = IpPacket::Tcp(response_tpl);
+                neighbor_addr = Some(response.ip_repr().dst_addr());
+                new_packet = Some(response);
+                new_response = Some(response_and_keepalive);
+                break
+            }
+            next_handle += 1;
         }
         let egress_continues = new_packet.is_some();
         self.currentEgressState.replace(
             EgressState{
-                    socketsDuringEgress: socketsDuringEgress,
+                    socketsDuringEgress: Some(sockets),
                     currentHandle: next_handle,
                     currentNeighbor: neighbor_addr,
                     currentPreSendPacket: new_packet,
