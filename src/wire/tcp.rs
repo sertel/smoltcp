@@ -992,7 +992,7 @@ impl<'a> Repr<'a> {
 /// and share.
 #[cfg(feature = "ohua")]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReprP {
+pub struct ReprOwned {
     pub src_port: u16,
     pub dst_port: u16,
     pub control: Control,
@@ -1003,13 +1003,14 @@ pub struct ReprP {
     pub max_seg_size: Option<u16>,
     pub sack_permitted: bool,
     pub sack_ranges: [Option<(u32, u32)>; 3],
+    pub payload: Vec<u8>,
     pub payload_len: usize
 }
 
 #[cfg(feature = "ohua")]
-impl ReprP {
+impl ReprOwned {
     pub fn from<'a>(tcp_repr: Repr<'a>) -> Self {
-        ReprP {
+        ReprOwned {
             src_port : tcp_repr.src_port,
             dst_port : tcp_repr.dst_port,
             control : tcp_repr.control,
@@ -1020,7 +1021,23 @@ impl ReprP {
             max_seg_size : tcp_repr.max_seg_size,
             sack_permitted : tcp_repr.sack_permitted,
             sack_ranges : tcp_repr.sack_ranges,
+            payload: tcp_repr.payload.to_vec(),
             payload_len : tcp_repr.payload.len()
+        }
+    }
+    pub fn to(&self) -> Repr {
+        Repr{
+            src_port: self.src_port,
+            dst_port: self.dst_port,
+            control: self.control,
+            seq_number: self.seq_number,
+            ack_number: self.ack_number,
+            window_len: self.window_len,
+            window_scale: self.window_scale,
+            max_seg_size: self.max_seg_size,
+            sack_permitted: self.sack_permitted,
+            sack_ranges: self.sack_ranges,
+            payload: &*self.payload
         }
     }
 

@@ -24,7 +24,7 @@ use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
 
-use crate::wire::ip::{Address};
+use crate::wire::ip::{Address, Repr};
 
 /// Structure to replace sending to a device by local 'emission'
 /// without the need to change the api otherwise
@@ -69,9 +69,9 @@ pub enum InterfaceCall{
 // ToDo: ReprP is just a conversion from Repr made in
 //  dispatch_before_optn -> check if that makes sense or should be moved
 //  downstream where it's needed
-type PacketTwice<'a> = ((IpRepr, TcpRepr<'a>), (TcpReprP, IpRepr, bool));
+type PacketTwice = ((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool));
 
-fn is_packet(maybe_packet:&Either<PacketTwice, Result<()>>)
+fn is_packet(maybe_packet: &Either<PacketTwice, Result<()>>)
              -> bool {
     match maybe_packet {
         Either::Left(_) => true,
@@ -86,9 +86,9 @@ fn as_packet(maybe_packet:Either<PacketTwice, Result<()>>)
 
 fn from_packet(
     maybe_packet: Either<PacketTwice, Result<()>>)
-    -> (IpPacket, (TcpReprP, IpRepr, bool)) {
+    -> (IpPacketOwned, (TcpReprP, IpRepr, bool)) {
     let (response_tpl, response_and_bool) = as_packet(maybe_packet);
-    let response = IpPacket::Tcp(response_tpl);
+    let response = IpPacketOwned::Tcp(response_tpl);
     (response, response_and_bool)
 }
 
@@ -236,7 +236,7 @@ struct EgressState<'es>{
     currentHandle:usize,
     // we need it just once at the end of the EgressStates lifetime
     currentNeighbor:Option<Address>,
-    currentPreSendPacket: Option<IpPacket<'es>>,
+    currentPreSendPacket: Option<IpPacketOwned>,
     //Copy of the intermediate results, we need to take it out and pass it to
     //dispatch_after
     currentPostSendPacket:Option< (TcpReprP, IpRepr, bool)>
@@ -667,6 +667,29 @@ pub(crate) enum EthernetPacket<'a> {
 
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub(crate) enum IpPacketOwned {
+    //Todo: Add other sockets
+    #[cfg(any(feature = "socket-tcp", feature = "ohua"))]
+    Tcp((IpRepr, TcpReprP)),
+}
+
+
+impl  IpPacketOwned {
+    pub(crate) fn to_IpPacket(&self) -> IpPacket {
+        match self {
+            IpPacketOwned::Tcp((IpRepr, TcpReprP)) =>
+                IpPacket::Tcp((IpRepr.clone(), TcpReprP.to()))
+        }
+    }
+    pub(crate) fn ip_repr(&self) -> IpRepr {
+        match self {
+            IpPacketOwned::Tcp((ip_repr, tcp_repr)) => ip_repr.clone()
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum IpPacket<'a> {
     #[cfg(feature = "proto-ipv4")]
     Icmpv4((Ipv4Repr, Icmpv4Repr<'a>)),
@@ -807,80 +830,6 @@ pub(crate) enum IgmpReportState {
 }
 
 impl<'a> Interface<'a> {
-/*
-    fn original_simple_poll<D>(
-        &mut self,
-        device: &mut D,
-        sockets: &mut SocketSet,
-        readiness_may_have_changed: bool )
-        -> (bool, Result<()>)
-        where
-        D: for<'d> Device<'d>, {
-        let processed_any = self.socket_ingress(device, sockets);
-        let (emitted_any, last_socket_result) =
-            {
-                let _caps = device.capabilities();
-                let mut emitted_any = false;
-                let mut temp_canarie = Ok(());
-                let mut maybe_break = false;
-                let mut socket_iter = sockets.items_mut();
-                let mut item_optn = socket_iter.next();
-                while !maybe_break && item_optn.is_some() {
-                    let item = item_optn.unwrap();
-                    if self.item_meta_egress_permitted(item) {
-                        let mut neighbor_addr = None;
-                        let result: Result<()> = {
-                            let packet_or_ok = self.match_socket_dispatch_before_DUMMY(item);
-                            if is_packet(&packet_or_ok) {
-                                let (response, response_and_keepalive) = from_packet(packet_or_ok);
-                                neighbor_addr = Some(response.ip_repr().dst_addr());
-                                let sending_token = device.transmit_no_ref();
-                                if sending_token.is_some() {
-                                    let local_dispatch_result = self.inner_dispatch_local_DUMMY(response, None);
-                                    if let Ok((packet, timest)) = local_dispatch_result {
-                                        let send_result = device.consume_no_ref(timest, packet, sending_token);
-                                        if send_result.is_ok() {
-                                            self.match_socket_dispatch_after_DUMMY(item, response_and_keepalive);
-                                            emitted_any = true;
-                                            //result = Ok(());
-                                            Ok(())
-                                        } else {
-                                            send_result
-                                        }
-                                    } else {
-                                        //result = dispatch_result;
-                                        Err(local_dispatch_result.unwrap_err())
-                                    }
-                                } else {
-                                    net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                                    //result = Err(Error::Exhausted);
-                                    Err(Error::Exhausted)
-                                }
-                            } else {
-                                //result = Ok(());
-                                Ok(())
-                            }
-                        };
-                        temp_canarie = result.clone();
-                        maybe_break = self.handle_result(result, item, neighbor_addr);
-                    }
-                    item_optn = socket_iter.next();
-                }
-            (emitted_any, temp_canarie)
-            };
-        // Also leave this out for now
-        //#[cfg(feature = "proto-igmp")]
-        //self.igmp_egress(device)?;
-
-        if processed_any || emitted_any {
-            self.simpl_poll_inner(device, sockets, true)
-        } else {
-            (readiness_may_have_changed, last_socket_result)
-        }
-
-    }
-
- */
     //Starting here functions are wrappers
     // created during 'transormation''
     fn inner_now(&mut self) -> Instant {
@@ -1047,7 +996,7 @@ impl<'a> Interface<'a> {
             InterfaceCall::InnerDispatchLocal(sending_token) => {
                 if sending_token.is_some() {
                     let currentPreSendPackage = self.currentEgressState.as_mut().unwrap().currentPreSendPacket.take().unwrap();
-                    let dispatch_result = self.inner.dispatch_local(currentPreSendPackage, None);
+                    let dispatch_result = self.inner.dispatch_local(currentPreSendPackage.to_IpPacket(), None);
                     if dispatch_result.is_ok() {
                         let (packet, timest) = dispatch_result.unwrap();
                         return Either::Left(DeviceCall::Consume(timest, packet))
@@ -1158,7 +1107,7 @@ impl<'a> Interface<'a> {
             };
             if is_packet(&packet_or_ok) {
                 let (response_tpl, response_and_keepalive) = packet_or_ok.left_or_panic();
-                let response = IpPacket::Tcp(response_tpl);
+                let response = IpPacketOwned::Tcp(response_tpl);
                 neighbor_addr = Some(response.ip_repr().dst_addr());
                 new_packet = Some(response);
                 new_response = Some(response_and_keepalive);

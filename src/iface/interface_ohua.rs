@@ -1094,7 +1094,7 @@ impl<'a> OInterface<'a> {
             Ok(false)
         }
     }
-
+/*
     #[cfg(feature = "ohua")]
     #[allow(dead_code)]
     // ToDo: Sockets wont live as long as the interface.
@@ -1178,9 +1178,11 @@ impl<'a> OInterface<'a> {
         }
        emitted_any
     }
+
+ */
 }
 
-
+/*
 #[cfg(feature = "ohua")]
 fn enter_sending_recursion<'a, DeviceT>(
     mut inner: Context<'a>,
@@ -1248,7 +1250,7 @@ where
             Ok((true, true))), // emitted_any = true
     }
 }
-
+*/
 
 
 /// This is in the end not at all a function on the socket but
@@ -2740,7 +2742,7 @@ mod test {
             Ok((&UDP_PAYLOAD[..], IpEndpoint::new(src_addr.into(), 67)))
         );
     }
-
+/*
    #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_tcp_socket_egress() {
@@ -2842,7 +2844,7 @@ mod test {
         // As it is a loopback we should also be able to receive from it
         iface1.socket_ingress(&mut device2, &mut sockets2);
     }
-
+*/
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_tcp_socket_ingress() {

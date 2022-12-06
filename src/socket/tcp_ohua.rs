@@ -2197,9 +2197,9 @@ impl<'socket> OhuaTcpSocket<'socket> {
     // what we would derive automatically
     // Yet I do not want to implement it again and I'm note sure if I'll need
     // the old one so here's just a wrapper for now
-    pub(crate) fn dispatch_before<'packet, 's:'packet >(
-        &'s mut self, cx: & mut Context
-    ) -> Either<((IpRepr, TcpRepr<'packet>), (TcpReprP, IpRepr, bool)), Result<(), Error>> {
+    pub(crate) fn dispatch_before(
+        &mut self, cx: &mut Context
+    ) -> Either<((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool)), Result<(), Error>> {
         let result_optn = self.dispatch_before_optn(cx);
         match result_optn {
             None => Either::Right(Ok(())),
@@ -2215,7 +2215,7 @@ impl<'socket> OhuaTcpSocket<'socket> {
     /// ie.e no ok_or
     pub(crate) fn dispatch_before_optn(
         &mut self, cx: &mut Context
-    ) -> Option<((IpRepr, TcpRepr), (TcpReprP, IpRepr, bool))>
+    ) -> Option<((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool))>
    {
         if self.tuple.is_none() {
             return None;
@@ -2448,11 +2448,12 @@ impl<'socket> OhuaTcpSocket<'socket> {
         // according to the call above, the payload should be set at this point
         // and we can readily derive a TcpReprP.
         let ip_repr_c = ip_repr.clone();
-        let tcp_repr = TcpReprP::from(repr);
+        let tcp_repr_send = TcpReprP::from(repr);
+        let tcp_repr_post_process = tcp_repr_send.clone();
         Some(
-            ((ip_repr, repr)
+            ((ip_repr, tcp_repr_send)
             ,(
-                tcp_repr,
+                tcp_repr_post_process,
                 ip_repr_c,
                 is_keep_alive
                 )
@@ -2629,7 +2630,7 @@ impl<'socket> OhuaTcpSocket<'socket> {
                 .unwrap_or(&PollAt::Ingress)
         }
     }
-
+/*
     #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_by_call(&mut self, cx: &mut Context, d: DispatchCall) -> DispatchResult {
         match d {
@@ -2647,8 +2648,10 @@ impl<'socket> OhuaTcpSocket<'socket> {
                 DispatchResult::Post
             }
         }
-    }
+    } */
 }
+
+
 
 
 // TODO What is the proper way to make this work without explicitly threading the socket?
