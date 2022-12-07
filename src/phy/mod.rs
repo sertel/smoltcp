@@ -430,6 +430,7 @@ pub trait TxToken {
         F: FnOnce(&mut [u8]) -> Result<R>;
 }
 
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum DeviceCall{
     Transmit(),
     Consume(Instant, Vec<u8>)

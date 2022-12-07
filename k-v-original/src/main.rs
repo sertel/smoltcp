@@ -57,7 +57,7 @@ fn main() {
     ];
 
     let medium = device.capabilities().medium;
-    let mut builder = InterfaceBuilder::new().ip_addrs(ip_addrs);
+    let mut builder = InterfaceBuilder::new(vec![]).ip_addrs(ip_addrs);
 
     let ipv4_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
     builder = builder.ipv4_fragments_cache(ipv4_frag_cache);
@@ -110,6 +110,8 @@ fn main() {
             socket.close();
         }
 
-        phy_wait(fd, iface.poll_delay(timestamp, &sockets)).expect("wait error");
+        // ToDo: waiting is messed up because we now take the internal sockets
+        //  of the interface which are just [] in this case
+        phy_wait(fd, iface.poll_delay(timestamp)).expect("wait error");
     }
 }

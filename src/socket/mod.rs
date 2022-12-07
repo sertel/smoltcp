@@ -12,7 +12,6 @@ size for a buffer, allocate it, and let the networking stack use it.
 */
 
 use crate::iface::Context;
-use crate::socket::tcp_ohua::OhuaTcpSocket;
 use crate::time::Instant;
 
 #[cfg(feature = "socket-dhcpv4")]

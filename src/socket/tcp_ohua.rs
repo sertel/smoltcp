@@ -19,9 +19,7 @@ use crate::wire::{
     IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber,
     TCP_HEADER_LEN,
 };
-use crate::wire::ip::Repr;
-// ToDo : Remove all 'ohua' feature flags here ...the whole thing is ohua-only
-// #[cfg(feature = "ohua")]
+
 use crate::wire::TcpReprP;
 
 macro_rules! tcp_trace {
@@ -2481,7 +2479,7 @@ impl<'socket> OhuaTcpSocket<'socket> {
     pub(crate) fn dispatch_after<E>(
         &mut self,
         cx: &mut Context,
-        (repr,ip_repr, is_keep_alive): (TcpReprP,IpRepr ,bool)
+        (repr,_ip_repr, is_keep_alive): (TcpReprP,IpRepr ,bool)
     ) -> Result<(), E>
     { // We've sent something, whether useful data or a keep-alive packet, so rewind
       // the keep-alive timer.

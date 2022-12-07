@@ -34,7 +34,6 @@ pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapI
     let tcp_tx_buffer = tcp_ohua::SocketBuffer::new(vec![0; 128]);
     let tcp_socket = tcp_ohua::OhuaTcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
-
     let mut builder = InterfaceBuilder::new(sockets).ip_addrs(ip_addrs);
 
     //ToDo: fragments, outpacket and 6loWPAN are guarded by compiler flags.

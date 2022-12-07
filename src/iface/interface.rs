@@ -65,6 +65,7 @@ impl LocalTxToken {
 
 pub type Messages = Vec<(SocketHandle, Vec<u8>)>;
 
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum InterfaceCall{
     InitPoll(Messages, Instant),
     InitEgress,
@@ -92,22 +93,6 @@ fn is_packet(maybe_packet: &Either<PacketTwice, Result<()>>)
         Either::Right(_) => false
     }
 
-}
-fn as_packet(maybe_packet:Either<PacketTwice, Result<()>>)
-    -> PacketTwice {
-    maybe_packet.left_or_panic()
-}
-
-fn from_packet(
-    maybe_packet: Either<PacketTwice, Result<()>>)
-    -> (IpPacketOwned, (TcpReprP, IpRepr, bool)) {
-    let (response_tpl, response_and_bool) = as_packet(maybe_packet);
-    let response = IpPacketOwned::Tcp(response_tpl);
-    (response, response_and_bool)
-}
-
-fn as_optn_addr(packet: &IpPacket) -> Option<Address>{
-    Some(packet.ip_repr().dst_addr())
 }
 
 
@@ -856,9 +841,14 @@ impl<'a> Interface<'a> {
     pub fn add_socket<T: AnySocket<'a>>(&mut self, socket: T) -> SocketHandle {
         self.sockets.as_mut().unwrap().add(socket)
     }
+
+    /// Only for testing purpose
+    fn get_mut<T: AnySocket<'a>>(&mut self, handle: SocketHandle) -> &mut T {
+        self.sockets.as_mut().unwrap().get_mut(handle)
+    }
     //Starting here functions are wrappers
     // created during 'transormation''
-    pub fn load_sockets(&mut self, mut messages: Messages) {
+    pub fn load_sockets(&mut self, messages: Messages) {
         let sockets = self.sockets.as_mut().unwrap();
         for (handle, message) in messages.iter() {
             let currentSocket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(*handle);
@@ -1115,7 +1105,6 @@ impl<'a> Interface<'a> {
                 // over the sockets until it finds onde that can send and produces
                 // a packet. If it has a new packet it updates the egress state
                 // to hold the current socket and the packet until we need it
-                let first_time = false;
                 let maybe_next_packet = self.iterate_to_next_send();
                 if maybe_next_packet.is_some() {
                     // we remain in the egress loop
@@ -4009,18 +3998,17 @@ impl<'a> InterfaceInner<'a> {
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
-
     #[cfg(feature = "proto-igmp")]
     use std::vec::Vec;
 
     use super::*;
 
     use crate::iface::Interface;
+    use crate::time::Instant;
     #[cfg(feature = "medium-ethernet")]
     use crate::iface::NeighborCache;
     use crate::phy::{ChecksumCapabilities, Loopback, BrokenLoopback};
     #[cfg(feature = "proto-igmp")]
-    use crate::time::Instant;
     use crate::{Error, Result};
     use crate::socket::tcp_ohua::test::{
          OhuaTestSocket,
@@ -4057,7 +4045,7 @@ mod test {
             IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
-        let iface_builder = InterfaceBuilder::new().ip_addrs(ip_addrs);
+        let iface_builder = InterfaceBuilder::new(vec![]).ip_addrs(ip_addrs);
 
         #[cfg(feature = "proto-ipv4-fragmentation")]
         let iface_builder =
@@ -4083,7 +4071,7 @@ mod test {
             IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
-        let iface_builder = InterfaceBuilder::new()
+        let iface_builder = InterfaceBuilder::new(vec![])
             .hardware_addr(EthernetAddress::default().into())
             .neighbor_cache(NeighborCache::new(BTreeMap::new()))
             .ip_addrs(ip_addrs);
@@ -4117,7 +4105,7 @@ mod test {
             IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
-        let iface_builder = InterfaceBuilder::new()
+        let iface_builder = InterfaceBuilder::new(vec![])
             .hardware_addr(EthernetAddress::default().into())
             .neighbor_cache(NeighborCache::new(BTreeMap::new()))
             .ip_addrs(ip_addrs);
@@ -4169,7 +4157,7 @@ mod test {
     #[cfg(all(feature = "medium-ethernet"))]
     fn test_builder_initialization_panic() {
         let mut device = Loopback::new(Medium::Ethernet);
-        InterfaceBuilder::new().finalize(&mut device);
+        InterfaceBuilder::new(vec![]).finalize(&mut device);
     }
 
     #[test]
@@ -5400,14 +5388,14 @@ mod test {
 
    #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_ohua_socket_egress() {
+    fn test_ohua_poll() {
         use crate::socket::tcp::test::{
             socket_established_with_endpoints, TestSocket};
         use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
         use crate::iface::mock;
         use crate::socket::tcp_ohua::test::{
             ohua_socket_established_with_endpoints, OhuaTestSocket};
-        //smoltcp
+        //smoltcp - the usual way
         let (mut iface1, mut sockets1, mut device1) = create();
 
         let TestSocket{socket, cx:_cx} = socket_established_with_endpoints(
@@ -5456,8 +5444,8 @@ mod test {
 
         // OHUA: Version
 
-        net_debug!("Now the same procedure for socket_egress_tcp");
-        let (mut iface2, mut sockets2, mut device2) = mock();
+        net_debug!("Now the same procedure for the ohua version");
+        let (mut iface2, mut sockets2, mut device2) = create();
         let OhuaTestSocket{socket, cx:_cx} =
             ohua_socket_established_with_endpoints(
                 IpEndpoint{
@@ -5472,33 +5460,43 @@ mod test {
         // Devices sending buffer should again be empty
         assert!(device2.empty_tx());
 
-        let tcp_socket_handle2 = sockets2.add(socket);
+        let tcp_socket_handle2 = iface2.add_socket(socket);
 
-        let socket2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle2);
+        let socket2 = iface2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle2);
+
+        // Sockets sending buffer should be empty before sending
         assert!(!socket2.can_recv());
         assert!(socket2.may_send());
         assert!(socket2.can_send());
-        // Sockets sending buffer should be empty before sending
         assert!(socket2.send_queue()==0);
 
-        // Enqueue the message in the sockets sending buffer
-        let result_len = socket2.send_slice(msg);
-        assert_eq!(result_len, Ok(msg_len));
-        net_debug!("running egress with ohua version");
-        assert_eq!(iface2.socket_egress(&mut device2, &mut sockets2), true);
+        let timestamp = Instant::now();
+        let msg = "hello".as_bytes().to_vec();
+        let messages = vec![(tcp_socket_handle2, msg.clone())];
+        let dev_transmit_call = iface2.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
+        assert!(Either::is_left(&dev_transmit_call));
+        let call = dev_transmit_call.left_or_panic();
+        assert_eq!(call, DeviceCall::Transmit());
+        let iface_call = device2.process_call(call);
+        assert_eq!(iface_call, InterfaceCall::InnerDispatchLocal(Some(())));
+        let dev_send_call = iface2.process_call::<Loopback>(iface_call);
+        let dev_call = dev_send_call.left_or_panic();
+        // First Package ariving at the device is not the message
+        // assert_eq!(dev_call, DeviceCall::Consume(timestamp, vec![104, 101, 108, 108, 111]))
+
+       /*
         // Again make sure the data arrived at the device level:
         // Devices sending buffer should contain our packet
         assert_eq!(1, device2.num_tx_packets());
         net_debug!("one packet in the buffer :-)");
 
-       // TODO compare the states of both sockets
+       // compare the states of both sockets
        let s1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1).state();
        let s2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle2).state();
-       assert_eq!(s1, s2);
+       assert_eq!(s1, s2);*/
 
     }
-
-/*
+    /*
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_simple_poll_works() {
@@ -5557,8 +5555,8 @@ mod test {
         assert_eq!(poll_result, Ok(false));
         assert_eq!(last_socket_egress_result, Ok(()));
         assert_eq!(0, device.num_tx_packets());
-    }
-
+    }*/
+    /*
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_simple_poll_wrong_socket_state() {
@@ -5624,7 +5622,6 @@ mod test {
         assert_eq!(last_socket_egress_result, Err(Error::Exhausted));
         assert_eq!(0, device.num_tx_packets());
     }
-
- */
+    */
 
 }
