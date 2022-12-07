@@ -26,5 +26,6 @@ pub use socket_set::{SocketHandle, SocketSet, SocketStorage};
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 pub use self::fragmentation::{PacketAssembler, PacketAssemblerSet as FragmentsCache};
 
-pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context, InterfaceCall};
+pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context, InterfaceCall, Messages};
 pub use self::interface_ohua::{OInterface, OInterfaceBuilder, mock};
+

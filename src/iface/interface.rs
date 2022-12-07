@@ -9,8 +9,8 @@ use managed::{ManagedMap, ManagedSlice};
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 use super::fragmentation::PacketAssemblerSet;
-use super::socket_set::{SocketSet};
-use crate::iface::{Routes};
+use super::socket_set::{SocketSet, SocketStorage};
+use crate::iface::{Routes, SocketHandle};
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use crate::iface::{NeighborAnswer, NeighborCache};
 use crate::phy::{ChecksumCapabilities, Device, DeviceCall, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -24,8 +24,21 @@ use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
 
-use crate::wire::ip::{Address, Repr};
+use crate::wire::ip::{Address};
 
+fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
+    let recvd_len = octets.len();
+    let data = octets.to_owned();
+    // Debug print is done in the app
+    /*
+    if !data.is_empty(){
+        debug!(
+            "tcp:6970 recv data: {:?}",
+            str::from_utf8(data.as_ref()).unwrap_or("(invalid utf8)")
+        );
+    }*/
+    (recvd_len, data)
+}
 /// Structure to replace sending to a device by local 'emission'
 /// without the need to change the api otherwise
 pub struct LocalTxToken {
@@ -50,9 +63,10 @@ impl LocalTxToken {
     }
 }
 
+pub type Messages = Vec<(SocketHandle, Vec<u8>)>;
 
 pub enum InterfaceCall{
-    InitPoll(SocketSet<'static>, Instant),
+    InitPoll(Messages, Instant),
     InitEgress,
     PollLoopCondition,
     // Todo: To avoid the hassle with dyn Device::Token we use a simple ok for
@@ -214,13 +228,13 @@ macro_rules! check {
 /// a dependency on heap allocation, it instead owns a `BorrowMut<[T]>`, which can be
 /// a `&mut [T]`, or `Vec<T>` if a heap is available.
 pub struct Interface<'a> {
-    pub inner: InterfaceInner<'a>,
+    inner: InterfaceInner<'a>,
     fragments: FragmentsBuffer<'a>,
     out_packets: OutPackets<'a>,
     // We will probably replace this by a
     // State = Option<Ingress{}> | Option<Egress{}>
     currentEgressState: Option<EgressState<'a>>,
-    currentSockets:Option<SocketSet<'a>>,
+    sockets:Option<SocketSet<'a>>,
     emitted_any:bool,
     processed_any:bool,
     readiness_changed:bool
@@ -301,6 +315,7 @@ pub struct InterfaceBuilder<'a> {
     sixlowpan_fragments_cache_timeout: Duration,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     sixlowpan_out_buffer: Option<ManagedSlice<'a, u8>>,
+    sockets:SocketSet<'a>,
 }
 
 impl<'a> InterfaceBuilder<'a> {
@@ -343,7 +358,10 @@ let iface = builder.finalize(&mut device);
     "##
     )]
     #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub fn new<SocketsT>(sockets: SocketsT) -> Self
+    where
+        SocketsT: Into<ManagedSlice<'a, SocketStorage<'a>>>,
+    {
         InterfaceBuilder {
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
             hardware_addr: None,
@@ -370,6 +388,7 @@ let iface = builder.finalize(&mut device);
             sixlowpan_fragments_cache_timeout: Duration::from_secs(60),
             #[cfg(feature = "proto-sixlowpan-fragmentation")]
             sixlowpan_out_buffer: None,
+            sockets:SocketSet::new(sockets)
         }
     }
 
@@ -648,7 +667,7 @@ let iface = builder.finalize(&mut device);
                 rand,
             },
             currentEgressState:None,
-            currentSockets:None,
+            sockets:Some(self.sockets),
             emitted_any: false,
             processed_any: false,
             readiness_changed:false,
@@ -683,7 +702,7 @@ impl  IpPacketOwned {
     }
     pub(crate) fn ip_repr(&self) -> IpRepr {
         match self {
-            IpPacketOwned::Tcp((ip_repr, tcp_repr)) => ip_repr.clone()
+            IpPacketOwned::Tcp((ip_repr, _tcp_repr)) => ip_repr.clone()
         }
     }
 }
@@ -830,8 +849,56 @@ pub(crate) enum IgmpReportState {
 }
 
 impl<'a> Interface<'a> {
+    /// Add a socket to the interface, and return its handle.
+    ///
+    /// # Panics
+    /// This function panics if the storage is fixed-size (not a `Vec`) and is full.
+    pub fn add_socket<T: AnySocket<'a>>(&mut self, socket: T) -> SocketHandle {
+        self.sockets.as_mut().unwrap().add(socket)
+    }
     //Starting here functions are wrappers
     // created during 'transormation''
+    pub fn load_sockets(&mut self, mut messages: Messages) {
+        let sockets = self.sockets.as_mut().unwrap();
+        for (handle, message) in messages.iter() {
+            let currentSocket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(*handle);
+            if !currentSocket.is_open() {
+                currentSocket.listen(6969).unwrap();
+            }
+            if currentSocket.may_recv() {
+                if currentSocket.can_send() && !message.is_empty() {
+                    currentSocket.send_slice(message).unwrap();
+                }
+            } else if currentSocket.may_send() {
+                net_debug!("tcp:6969 close");
+                currentSocket.close();
+            }
+        }
+    }
+
+    pub fn unload_sockets(&mut self) -> Messages
+    {
+        let mut messages = vec![];
+        let sockets = self.sockets.as_mut().unwrap();
+        for index in 0..sockets.size() {
+            let handle = SocketHandle::from_index(index);
+            let currentSocket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(handle);
+            if !currentSocket.is_open() {
+                currentSocket.listen(6969).unwrap();
+            }
+            if currentSocket.may_recv() {
+                let input = currentSocket.recv(process_octets).unwrap();
+                if currentSocket.can_send() && !input.is_empty() {
+                    messages.push((handle, input))
+                }
+            } else if currentSocket.may_send() {
+                    net_debug!("tcp:6969 close");
+                    currentSocket.close();
+            }
+        }
+        messages
+    }
+
     fn inner_now(&mut self) -> Instant {
         self.inner.now
     }
@@ -931,27 +998,29 @@ impl<'a> Interface<'a> {
     // device or a call to the app
     // We don't have calls to app right now so we just use the return values
     pub fn process_call<D>(
-        &'static mut self,
+        & mut self,
         call: InterfaceCall)
-        -> Either<DeviceCall, (bool, SocketSet<'_>)>
+        -> Either<DeviceCall, (bool, Messages)>
     where
     D: for<'d> Device<'d>,
     {
         match call {
             // This is essentially the entry point for the
             // communication with the app
-            InterfaceCall::InitPoll(sockets, timestamp) => {
+            InterfaceCall::InitPoll(messages, timestamp) => {
                 // This replaces the inface.poll call
                 // So we have to set the state thats 'permanent during one
                 // poll call'
                 // 1. set the timestamp
                 self.inner.now = timestamp;
-                // 2. Set Sockets
-                self.currentSockets = Some(sockets);
-                // 3. Set 'processing indicators'
+                // 2. Set 'processing indicators'
                 self.emitted_any = false;
                 self.processed_any = false;
                 self.readiness_changed = false;
+                // 3. "Load" the sockets with incomming messages from the
+                //    app
+                self.load_sockets(messages);
+
                 // now the original code would loop ingress and egress
                 /*
                 loop {
@@ -981,7 +1050,7 @@ impl<'a> Interface<'a> {
                 self.currentEgressState = Some(EgressState{
                     // When we call egress, there must be sockets available
                     // and meanwhile those sockets must not be available otherwise
-                    socketsDuringEgress: self.currentSockets.take(),
+                    socketsDuringEgress: self.sockets.take(),
                     currentHandle: 0,
                     currentNeighbor: None,
                     currentPreSendPacket: None,
@@ -1033,7 +1102,7 @@ impl<'a> Interface<'a> {
                     // If the egress loop ends, we return to the poll loop
                     // and give back the sockets
                     let EgressState{ socketsDuringEgress, ..} = self.currentEgressState.take().unwrap();
-                    self.currentSockets = Some(socketsDuringEgress.unwrap());
+                    self.sockets = Some(socketsDuringEgress.unwrap());
                     self.process_call::<D>(InterfaceCall::PollLoopCondition)
                 } else {
                     self.process_call::<D>(InterfaceCall::UpdateEgressState)
@@ -1046,6 +1115,7 @@ impl<'a> Interface<'a> {
                 // over the sockets until it finds onde that can send and produces
                 // a packet. If it has a new packet it updates the egress state
                 // to hold the current socket and the packet until we need it
+                let first_time = false;
                 let maybe_next_packet = self.iterate_to_next_send();
                 if maybe_next_packet.is_some() {
                     // we remain in the egress loop
@@ -1056,7 +1126,7 @@ impl<'a> Interface<'a> {
                     // so we need to give the sockets back to the Interface and
                     // remove the EgressState
                     let EgressState{ socketsDuringEgress, ..} = self.currentEgressState.take().unwrap();
-                    self.currentSockets = Some(socketsDuringEgress.unwrap());
+                    self.sockets = Some(socketsDuringEgress.unwrap());
                     return self.process_call::<D>(InterfaceCall::PollLoopCondition)
                 }
             }
@@ -1066,7 +1136,8 @@ impl<'a> Interface<'a> {
                     self.readiness_changed = true;
                     self.process_call::<D>(InterfaceCall::InitEgress)
                 } else {
-                    return Either::Right((self.readiness_changed, self.currentSockets.take().unwrap()))
+                    let messages = self.unload_sockets();
+                    return Either::Right((self.readiness_changed,messages))
                 }
             }
 
@@ -1075,7 +1146,7 @@ impl<'a> Interface<'a> {
 
     fn iterate_to_next_send(&mut self) -> Option<()> {
         let EgressState{
-            mut socketsDuringEgress,
+            socketsDuringEgress,
             currentHandle: handle,
             ..
         } = self.currentEgressState.take().unwrap();
@@ -1093,11 +1164,11 @@ impl<'a> Interface<'a> {
         let mut new_packet = None;
         let mut neighbor_addr = None;
         let mut new_response = None;
-        let mut next_handle = handle + 1;
+        let mut next_handle = handle;
 
         let mut sockets = socketsDuringEgress.unwrap();
-        let max_index = sockets.size().clone();
-        while let Some(item)  = sockets.get_mut_item(next_handle) {
+        while next_handle < sockets.size() {
+            let item= sockets.get_mut_item(next_handle).unwrap();
             if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
                 continue;
             }
@@ -1527,12 +1598,15 @@ impl<'a> Interface<'a> {
     ///
     /// [poll]: #method.poll
     /// [Duration]: struct.Duration.html
-    pub fn poll_delay(&mut self, timestamp: Instant, sockets: &SocketSet<'_>) -> Option<Duration> {
-        match self.poll_at(timestamp, sockets) {
+    pub fn poll_delay(&mut self, timestamp: Instant) -> Option<Duration> {
+        let sockets = self.sockets.take().unwrap();
+        let duration = match self.poll_at(timestamp, & sockets) {
             Some(poll_at) if timestamp < poll_at => Some(poll_at - timestamp),
             Some(_) => Some(Duration::from_millis(0)),
             _ => None,
-        }
+        };
+        self.sockets.replace(sockets);
+        duration
     }
 
     fn socket_ingress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool

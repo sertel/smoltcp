@@ -4,16 +4,12 @@ use std::os::unix::prelude::RawFd;
 use log::debug;
 
 use crate::ohua_util::store::Store;
-use smoltcp::iface::{FragmentsCache, OInterface, OInterfaceBuilder,
-                     NeighborCache, SocketHandle, SocketSet,
-                     Interface, InterfaceBuilder};
+use smoltcp::iface::{FragmentsCache, NeighborCache, SocketHandle, SocketSet, Interface, InterfaceBuilder, Messages};
 use smoltcp::phy::{Device, Medium, TunTapInterface};
 use smoltcp::socket::{tcp_ohua};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 // use smoltcp::{Result}; can't import bcs it's private
 use std::str;
-
-
 
 
 pub fn init_device() -> (TunTapInterface, RawFd) {
@@ -23,7 +19,7 @@ pub fn init_device() -> (TunTapInterface, RawFd) {
 }
 
 
-pub fn init_stack_and_device() -> (Interface<'static>, TunTapInterface, RawFd)
+pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapInterface,  RawFd)
 {
     let mut out_packet_buffer = vec![];// [0u8; 1280];
     // First init the device
@@ -38,7 +34,16 @@ pub fn init_stack_and_device() -> (Interface<'static>, TunTapInterface, RawFd)
     ];
 
     let medium = device.capabilities().medium;
-    let mut builder = InterfaceBuilder::new().ip_addrs(ip_addrs);
+
+    // Third assemble the sockets and the interface
+    let mut sockets = vec![];
+
+    let tcp_rx_buffer = tcp_ohua::SocketBuffer::new(vec![0; 64]);
+    let tcp_tx_buffer = tcp_ohua::SocketBuffer::new(vec![0; 128]);
+    let tcp_socket = tcp_ohua::OhuaTcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
+
+
+    let mut builder = InterfaceBuilder::new(sockets).ip_addrs(ip_addrs);
 
     //ToDo: fragments, outpacket and 6loWPAN are guarded by compiler flags.
     //      However, if I don't init them I get a panic from the Builder
@@ -55,88 +60,61 @@ pub fn init_stack_and_device() -> (Interface<'static>, TunTapInterface, RawFd)
             .hardware_addr(ethernet_addr.into())
             .neighbor_cache(neighbor_cache);
     }
-    let iface = builder.finalize(&mut device);
-
-    (iface, device, file_descriptor)
+    let mut iface = builder.finalize(&mut device);
+    let tcp_socket_handle = iface.add_socket(tcp_socket);
+    (iface, vec![tcp_socket_handle],  device, file_descriptor)
 }
 
 // ToDo: The SocketSet contains a 'ManagedSlice' of sockets and this seems to borrow
 //       Sockets/Buffers so I need a lifetime annotation here
 //       What does it mean to make it static, in particular considering that we will
 //       send it between stack and app?
-pub fn init_app_and_sockets() -> (App, SocketSet<'static>){
+pub fn init_app_and_sockets(handles:Vec<SocketHandle>) -> (App, Messages){
     let store = Store::default();
-    let mut sockets = SocketSet::new(vec![]);
-
-    let tcp_rx_buffer = tcp_ohua::SocketBuffer::new(vec![0; 64]);
-    let tcp_tx_buffer = tcp_ohua::SocketBuffer::new(vec![0; 128]);
-    let tcp_socket = tcp_ohua::OhuaTcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
-
-    let tcp_socket_handle = sockets.add::<tcp_ohua::OhuaTcpSocket>(tcp_socket);
-    (App{ store, tcp_socket_handle}, sockets)
+    let messages =  handles
+        .iter()
+        .map(|handle| (*handle, vec![])).collect();
+    (App{ store, tcp_socket_handles: handles}, messages)
 }
 
 // ToDo: For now the App has just one socket but I'll need a more sophisticated way
 //       to store/identify handles for different sockets
 pub struct App {
     store: Store,
-    tcp_socket_handle: SocketHandle,
+    tcp_socket_handles: Vec<SocketHandle>,
 }
 
 
 impl App {
 
-    pub fn do_app_stuff<'s, E: std::fmt::Display>(
+    pub fn do_app_stuff<E>(
         &mut self,
-        mut sockets_obj: SocketSet<'s>,
-        poll_res: Result<bool, E>)
-        -> SocketSet<'s>
+        poll_res: Result<bool, E>,
+        mut messages:Messages
+    ) -> Messages
+    where E: std::fmt::Display
     {
-        match poll_res {
+    match poll_res {
             Ok(_) => {}
             Err(e) => {
             debug!("poll error: {}", e);
             }
         }
-        let sockets = &mut sockets_obj;
-        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(self.tcp_socket_handle);
-        if !socket.is_open() {
-            socket.listen(6969).unwrap();
-        }
-
-        if socket.may_recv() {
-            // ToDo: Check how we will handle function references i.e. can we "tell"
-            //       Socket.recv to use this/any partcular function?
-            //       Simple way out would be to cleanly separate and have the socket return the pure buffer
-            let input = socket.recv(App::process_octets).unwrap();
-            if socket.can_send() && !input.is_empty() {
-                debug!(
+    for (handle, msg) in messages.iter_mut() {
+       if !msg.is_empty() {
+           debug!(
                     "tcp:6969 send data: {:?}",
-                    str::from_utf8(input.as_ref()).unwrap_or("(invalid utf8)")
-                );
-                let outbytes = self.handle_message(input);
-                socket.send_slice(&outbytes[..]).unwrap();
-            }
-        } else if socket.may_send() {
-            debug!("tcp:6969 close");
-            socket.close();
+                    str::from_utf8(msg.as_ref()).unwrap_or("(invalid utf8)")
+           );
+           let answer = self.handle_message(msg);
+           *msg = answer
         }
-        sockets_obj
+    }
+    messages
     }
 
-    fn handle_message(&mut self, input:Vec<u8>)-> Vec<u8> {
+    fn handle_message(&mut self, input: &mut Vec<u8>) -> Vec<u8> {
         self.store.handle_message(&input)
     }
 
-    fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
-        let recvd_len = octets.len();
-        let data = octets.to_owned();
-        if !data.is_empty(){
-            debug!(
-                "tcp:6970 recv data: {:?}",
-                str::from_utf8(data.as_ref()).unwrap_or("(invalid utf8)")
-            );
-        }
-        (recvd_len, data)
-    }
 }
