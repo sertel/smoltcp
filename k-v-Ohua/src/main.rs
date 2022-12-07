@@ -5,7 +5,7 @@ use std::os::unix::io::RawFd;
 use ohua_util::init_components::{init_app_and_sockets, init_stack_and_device};
 use smoltcp::{Either, Result};
 use smoltcp::iface::{Interface, SocketSet, InterfaceCall, Messages, SocketHandle};
-use smoltcp::phy::{Device, TunTapInterface, wait as phy_wait};
+use smoltcp::phy::{Device, Loopback, TunTapInterface, wait as phy_wait};
 use smoltcp::time::Instant;
 use crate::ohua_util::init_components::App;
 
@@ -29,16 +29,22 @@ fn main() {
 "#
     );
     let (mut ip_stack, handels, mut device, fd):(Interface, Vec<SocketHandle>, TunTapInterface, RawFd) = init_stack_and_device();
-    let (app, messages):(App,  Messages) = init_app_and_sockets(handels);
-// ToDo: Currently we send around the actual SocketSet
-//       -> this will not work out of the box, as SocketSet and the Sockets do
-//          not implement serialization
-//       -> we either need to implement serialization for the sockets OR
-//          implement a serial format to identify sockets and operations on sockets
-//          as well as a "replay" function to apply the changes/functions either side
-//          made on their SocketSet on the other side of the channel stack <-> app
-
-    loop_as_rec(app, ip_stack, device, messages, fd)
+    let (mut app, mut messages):(App, Messages) = init_app_and_sockets(handels);
+    //loop_as_rec(app, ip_stack, device, messages, fd)
+    let mut timestamp = Instant::now();
+    let mut iface_call = InterfaceCall::InitPoll(messages, timestamp);
+    loop {
+        let device_call_or_return = ip_stack.process_call::<TunTapInterface>(iface_call);
+        if Either::is_left(&device_call_or_return){
+            iface_call = device.process_call(device_call_or_return.left_or_panic())
+        } else {
+            let (readiness_has_changed, messages_new) = device_call_or_return.right_or_panic();
+            messages = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
+            phy_wait(fd, ip_stack.poll_delay(timestamp)).expect("wait error");
+            timestamp = Instant::now();
+            iface_call = InterfaceCall::InitPoll(messages, timestamp);
+        }
+    }
 }
 
 

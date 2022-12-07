@@ -247,7 +247,7 @@ struct EgressState<'es>{
     // and becomes usable in  poll afterward
     socketsDuringEgress: Option<SocketSet<'es>>,
     // We need to reuse it, doesn't live as long as the other refs
-    currentHandle:usize,
+    currentHandle:Option<usize>,
     // we need it just once at the end of the EgressStates lifetime
     currentNeighbor:Option<Address>,
     currentPreSendPacket: Option<IpPacketOwned>,
@@ -915,7 +915,7 @@ impl<'a> Interface<'a> {
         } = self.currentEgressState.take().unwrap();
 
         let sockets_as_in_original_code = socketsDuringEgress.as_mut().unwrap();
-        let item = sockets_as_in_original_code.get_mut_item(handle).unwrap();
+        let item = sockets_as_in_original_code.get_mut_item(handle.unwrap()).unwrap();
         let result = match &mut item.socket{
             Socket::OhuaTcp(socket) => {
                socket.dispatch_after(self.context(), currentResponse.unwrap())
@@ -946,7 +946,7 @@ impl<'a> Interface<'a> {
             currentPostSendPacket
         } = self.currentEgressState.take().unwrap();
 
-        let item = socketsDuringEgress.as_mut().unwrap().get_mut_item(currentHandle).unwrap();
+        let item = socketsDuringEgress.as_mut().unwrap().get_mut_item(currentHandle.unwrap()).unwrap();
         let neighbor_addr = currentNeighbor;
 
         let should_break;
@@ -1051,7 +1051,7 @@ impl<'a> Interface<'a> {
                     // When we call egress, there must be sockets available
                     // and meanwhile those sockets must not be available otherwise
                     socketsDuringEgress: self.sockets.take(),
-                    currentHandle: 0,
+                    currentHandle: None,
                     currentNeighbor: None,
                     currentPreSendPacket: None,
                     currentPostSendPacket: None,
@@ -1164,25 +1164,27 @@ impl<'a> Interface<'a> {
         let mut new_packet = None;
         let mut neighbor_addr = None;
         let mut new_response = None;
-        let mut next_handle = handle;
+        let mut next_handle =
+            if handle.is_some() {
+                handle.unwrap() + 1
+            } else { 0 };
 
         let mut sockets = socketsDuringEgress.unwrap();
         while next_handle < sockets.size() {
             let item= sockets.get_mut_item(next_handle).unwrap();
-            if !item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
-                continue;
-            }
-            let packet_or_ok = match &mut item.socket {
-                Socket::OhuaTcp(socket) => socket.dispatch_before(inner),
-                _ => panic!("Only Ohua TCP sockets supported!"),
-            };
-            if is_packet(&packet_or_ok) {
-                let (response_tpl, response_and_keepalive) = packet_or_ok.left_or_panic();
-                let response = IpPacketOwned::Tcp(response_tpl);
-                neighbor_addr = Some(response.ip_repr().dst_addr());
-                new_packet = Some(response);
-                new_response = Some(response_and_keepalive);
-                break
+            if item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
+                let packet_or_ok = match &mut item.socket {
+                    Socket::OhuaTcp(socket) => socket.dispatch_before(inner),
+                    _ => panic!("Only Ohua TCP sockets supported!"),
+                };
+                if is_packet(&packet_or_ok) {
+                    let (response_tpl, response_and_keepalive) = packet_or_ok.left_or_panic();
+                    let response = IpPacketOwned::Tcp(response_tpl);
+                    neighbor_addr = Some(response.ip_repr().dst_addr());
+                    new_packet = Some(response);
+                    new_response = Some(response_and_keepalive);
+                    break
+                }
             }
             next_handle += 1;
         }
@@ -1190,7 +1192,7 @@ impl<'a> Interface<'a> {
         self.currentEgressState.replace(
             EgressState{
                     socketsDuringEgress: Some(sockets),
-                    currentHandle: next_handle,
+                    currentHandle: Some(next_handle),
                     currentNeighbor: neighbor_addr,
                     currentPreSendPacket: new_packet,
                     currentPostSendPacket: new_response,

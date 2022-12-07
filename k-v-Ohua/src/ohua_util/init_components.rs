@@ -8,16 +8,8 @@ use smoltcp::iface::{FragmentsCache, NeighborCache, SocketHandle, SocketSet, Int
 use smoltcp::phy::{Device, Medium, TunTapInterface};
 use smoltcp::socket::{tcp_ohua};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
-// use smoltcp::{Result}; can't import bcs it's private
+use smoltcp::{Result};
 use std::str;
-
-
-pub fn init_device() -> (TunTapInterface, RawFd) {
-    let device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
-    let file_descriptor = device.as_raw_fd();
-    (device, file_descriptor)
-}
-
 
 pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapInterface,  RawFd)
 {
@@ -87,17 +79,16 @@ pub struct App {
 
 impl App {
 
-    pub fn do_app_stuff<E>(
+    pub fn do_app_stuff(
         &mut self,
-        poll_res: Result<bool, E>,
+        poll_res: Result<bool>,
         mut messages:Messages
     ) -> Messages
-    where E: std::fmt::Display
     {
     match poll_res {
             Ok(_) => {}
             Err(e) => {
-            debug!("poll error: {}", e);
+                debug!("poll error: {}", e);
             }
         }
     for (handle, msg) in messages.iter_mut() {
