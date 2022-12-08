@@ -12,7 +12,7 @@ mod neighbor;
 mod route;
 mod socket_meta;
 mod socket_set;
-mod interface_ohua;
+
 
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 pub(crate) use self::neighbor::Answer as NeighborAnswer;
@@ -27,5 +27,5 @@ pub use socket_set::{SocketHandle, SocketSet, SocketStorage};
 pub use self::fragmentation::{PacketAssembler, PacketAssemblerSet as FragmentsCache};
 
 pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context, InterfaceCall, Messages};
-pub use self::interface_ohua::{OInterface, OInterfaceBuilder, mock};
+
 

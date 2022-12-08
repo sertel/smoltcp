@@ -2471,7 +2471,7 @@ impl<'socket> OhuaTcpSocket<'socket> {
     }
 
     // This is literally just a copy of the second part of dispatch
-    // At least the return type was different in Sebastains version and I don't
+    // At least the return type was different in Sebastian's version and I don't
     // want to check manually if there's more differences from the original
     // So here we go, another 'dispatch'
     // Also it will have the
@@ -2529,7 +2529,7 @@ impl<'socket> OhuaTcpSocket<'socket> {
     }
 
 
-
+/*
     #[cfg(feature = "ohua")]
     pub(crate) fn dispatch_after_unit(
         &mut self,
@@ -2557,7 +2557,6 @@ impl<'socket> OhuaTcpSocket<'socket> {
         // Leave the rest of the state intact if sending a keep-alive packet, since those
         // carry a fake segment.
         if is_keep_alive {
-            // ToDo:: Original Code returned Ok here. Why don't we?!
             return;
         }
 
@@ -2586,7 +2585,7 @@ impl<'socket> OhuaTcpSocket<'socket> {
         // ToDo:: Original Code returned Ok here. Why don't we?!
     }
 
-
+*/
 
     #[allow(clippy::if_same_then_else)]
     pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {

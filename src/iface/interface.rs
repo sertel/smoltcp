@@ -889,10 +889,6 @@ impl<'a> Interface<'a> {
         messages
     }
 
-    fn inner_now(&mut self) -> Instant {
-        self.inner.now
-    }
-
     fn match_socket_dispatch_after( &mut self) -> Result<()>
     {
         //
@@ -1329,7 +1325,8 @@ impl<'a> Interface<'a> {
         D: for<'d> Device<'d>,
     {
         self.inner.now = timestamp;
-        let temp_canarie = Ok(());
+        let mut temp_canarie = Ok(());
+        let mut emitted_any;
         #[cfg(feature = "proto-ipv4-fragmentation")]
         if let Err(e) = self
             .fragments
@@ -1360,8 +1357,8 @@ impl<'a> Interface<'a> {
         loop {
             let processed_any = self.socket_ingress(device, sockets);
             net_debug!("Processed any was {}", processed_any);
-            let (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
-            net_debug!("Emitted any was {}", emitted_any);
+            (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
+            net_debug!("Emitted any was {}, canary was {:?}", emitted_any, temp_canarie);
             #[cfg(feature = "proto-igmp")]
             let igmp_result = self.igmp_egress(device);
             if igmp_result.is_err() {
@@ -1374,7 +1371,7 @@ impl<'a> Interface<'a> {
                 break;
             }
         }
-        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
+        net_debug!("Returning readiness changed: {}, canary: {:?}", readiness_may_have_changed, temp_canarie);
         (Ok(readiness_may_have_changed), temp_canarie)
     }
 
@@ -4015,9 +4012,9 @@ mod test {
     #[cfg(feature = "proto-igmp")]
     use crate::{Error, Result};
     use crate::socket::tcp_ohua::test::{
-         OhuaTestSocket,
-         ohua_socket_established_with_endpoints,
-         ohua_socket_closing_with_endpoints};
+        OhuaTestSocket,
+        ohua_socket_established_with_endpoints,
+        ohua_socket_closing_with_endpoints};
     use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
 
     #[allow(unused)]
@@ -4028,10 +4025,8 @@ mod test {
     }
 
     fn create<'a>() -> (Interface<'a>, SocketSet<'a>, Loopback) {
-        #[cfg(feature = "medium-ethernet")]
-        return create_ethernet();
-        #[cfg(not(feature = "medium-ethernet"))]
-        return create_ip();
+        #[cfg(feature = "medium-ethernet")] return create_ethernet();
+        #[cfg(not(feature = "medium-ethernet"))] return create_ip();
     }
 
 
@@ -4042,21 +4037,18 @@ mod test {
         let mut device = Loopback::new(Medium::Ip);
         let ip_addrs = [
             #[cfg(feature = "proto-ipv4")]
-            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+                IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
             #[cfg(feature = "proto-ipv6")]
-            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+                IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
             #[cfg(feature = "proto-ipv6")]
-            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+                IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
         let iface_builder = InterfaceBuilder::new(vec![]).ip_addrs(ip_addrs);
 
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        let iface_builder =
-            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+        #[cfg(feature = "proto-ipv4-fragmentation")] let iface_builder = iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
 
-        #[cfg(feature = "proto-igmp")]
-        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        #[cfg(feature = "proto-igmp")] let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
         let iface = iface_builder.finalize(&mut device);
 
         (iface, SocketSet::new(vec![]), device)
@@ -4068,63 +4060,45 @@ mod test {
         let mut device = Loopback::new(Medium::Ethernet);
         let ip_addrs = [
             #[cfg(feature = "proto-ipv4")]
-            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+                IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
             #[cfg(feature = "proto-ipv6")]
-            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+                IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
             #[cfg(feature = "proto-ipv6")]
-            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+                IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
-        let iface_builder = InterfaceBuilder::new(vec![])
-            .hardware_addr(EthernetAddress::default().into())
-            .neighbor_cache(NeighborCache::new(BTreeMap::new()))
-            .ip_addrs(ip_addrs);
+        let iface_builder = InterfaceBuilder::new(vec![]).hardware_addr(EthernetAddress::default().into()).neighbor_cache(NeighborCache::new(BTreeMap::new())).ip_addrs(ip_addrs);
 
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        let iface_builder = iface_builder
-            .sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()))
-            .sixlowpan_out_packet_cache(vec![]);
+        #[cfg(feature = "proto-sixlowpan-fragmentation")] let iface_builder = iface_builder.sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new())).sixlowpan_out_packet_cache(vec![]);
 
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        let iface_builder =
-            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+        #[cfg(feature = "proto-ipv4-fragmentation")] let iface_builder = iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
 
-        #[cfg(feature = "proto-igmp")]
-        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        #[cfg(feature = "proto-igmp")] let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
         let iface = iface_builder.finalize(&mut device);
 
         (iface, SocketSet::new(vec![]), device)
     }
 
-        #[cfg(all(feature = "medium-ethernet"))]
+    #[cfg(all(feature = "medium-ethernet"))]
     fn create_ethernet_exhausted_device<'a>() -> (Interface<'a>, SocketSet<'a>, BrokenLoopback) {
         // Create a basic device
         let mut device = BrokenLoopback::new(Medium::Ethernet);
         let ip_addrs = [
             #[cfg(feature = "proto-ipv4")]
-            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+                IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
             #[cfg(feature = "proto-ipv6")]
-            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+                IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
             #[cfg(feature = "proto-ipv6")]
-            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+                IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
-        let iface_builder = InterfaceBuilder::new(vec![])
-            .hardware_addr(EthernetAddress::default().into())
-            .neighbor_cache(NeighborCache::new(BTreeMap::new()))
-            .ip_addrs(ip_addrs);
+        let iface_builder = InterfaceBuilder::new(vec![]).hardware_addr(EthernetAddress::default().into()).neighbor_cache(NeighborCache::new(BTreeMap::new())).ip_addrs(ip_addrs);
 
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        let iface_builder = iface_builder
-            .sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()))
-            .sixlowpan_out_packet_cache(vec![]);
+        #[cfg(feature = "proto-sixlowpan-fragmentation")] let iface_builder = iface_builder.sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new())).sixlowpan_out_packet_cache(vec![]);
 
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        let iface_builder =
-            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+        #[cfg(feature = "proto-ipv4-fragmentation")] let iface_builder = iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
 
-        #[cfg(feature = "proto-igmp")]
-        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        #[cfg(feature = "proto-igmp")] let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
         let iface = iface_builder.finalize(&mut device);
 
         (iface, SocketSet::new(vec![]), device)
@@ -4137,8 +4111,7 @@ mod test {
             rx.consume(timestamp, |pkt| {
                 pkts.push(pkt.to_vec());
                 Ok(())
-            })
-            .unwrap();
+            }).unwrap();
         }
         pkts
     }
@@ -4149,9 +4122,7 @@ mod test {
 
     impl TxToken for MockTxToken {
         fn consume<R, F>(self, _: Instant, _: usize, _: F) -> Result<R>
-        where
-            F: FnOnce(&mut [u8]) -> Result<R>,
-        {
+            where F: FnOnce(&mut [u8]) -> Result<R>, {
             Err(Error::Unaddressable)
         }
     }
@@ -4440,9 +4411,7 @@ mod test {
         // ICMP error response when the destination address is a
         // broadcast address and no socket is bound to the port.
         assert_eq!(
-            iface
-                .inner
-                .process_udp(&mut sockets, ip_repr, false, packet_broadcast.into_inner()),
+            iface.inner.process_udp(&mut sockets, ip_repr, false, packet_broadcast.into_inner()),
             None
         );
     }
@@ -4466,26 +4435,22 @@ mod test {
 
         let socket_handle = sockets.add(udp_socket);
 
-        #[cfg(feature = "proto-ipv6")]
-        let src_ip = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))]
-        let src_ip = Ipv4Address::new(0x7f, 0x00, 0x00, 0x02);
+        #[cfg(feature = "proto-ipv6")] let src_ip = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))] let src_ip = Ipv4Address::new(0x7f, 0x00, 0x00, 0x02);
 
         let udp_repr = UdpRepr {
             src_port: 67,
             dst_port: 68,
         };
 
-        #[cfg(feature = "proto-ipv6")]
-        let ip_repr = IpRepr::Ipv6(Ipv6Repr {
+        #[cfg(feature = "proto-ipv6")] let ip_repr = IpRepr::Ipv6(Ipv6Repr {
             src_addr: src_ip,
             dst_addr: Ipv6Address::LINK_LOCAL_ALL_NODES,
             next_header: IpProtocol::Udp,
             payload_len: udp_repr.header_len() + UDP_PAYLOAD.len(),
             hop_limit: 0x40,
         });
-        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))]
-        let ip_repr = IpRepr::Ipv4(Ipv4Repr {
+        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))] let ip_repr = IpRepr::Ipv4(Ipv4Repr {
             src_addr: src_ip,
             dst_addr: Ipv4Address::BROADCAST,
             next_header: IpProtocol::Udp,
@@ -4510,9 +4475,7 @@ mod test {
 
         // Packet should be handled by bound UDP socket
         assert_eq!(
-            iface
-                .inner
-                .process_udp(&mut sockets, ip_repr, false, packet.into_inner()),
+            iface.inner.process_udp(&mut sockets, ip_repr, false, packet.into_inner()),
             None
         );
 
@@ -4602,7 +4565,6 @@ mod test {
     #[test]
     #[cfg(feature = "socket-udp")]
     fn test_icmp_reply_size() {
-
         #[cfg(feature = "proto-ipv6")]
         use crate::wire::Icmpv6DstUnreachable;
         #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
@@ -4617,14 +4579,10 @@ mod test {
 
         let (mut iface, mut sockets, _device) = create();
 
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
-        let src_addr = Ipv4Address([192, 168, 1, 1]);
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
-        let dst_addr = Ipv4Address([192, 168, 1, 2]);
-        #[cfg(feature = "proto-ipv6")]
-        let src_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-        #[cfg(feature = "proto-ipv6")]
-        let dst_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let src_addr = Ipv4Address([192, 168, 1, 1]);
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let dst_addr = Ipv4Address([192, 168, 1, 2]);
+        #[cfg(feature = "proto-ipv6")] let src_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        #[cfg(feature = "proto-ipv6")] let dst_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
 
         // UDP packet that if not truncated will cause a icmp port unreachable reply
         // to exceed the minimum mtu bytes in length.
@@ -4642,16 +4600,14 @@ mod test {
             |buf| fill_slice(buf, 0x2a),
             &ChecksumCapabilities::default(),
         );
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
-        let ip_repr = Ipv4Repr {
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let ip_repr = Ipv4Repr {
             src_addr,
             dst_addr,
             next_header: IpProtocol::Udp,
             hop_limit: 64,
             payload_len: udp_repr.header_len() + MAX_PAYLOAD_LEN,
         };
-        #[cfg(feature = "proto-ipv6")]
-        let ip_repr = Ipv6Repr {
+        #[cfg(feature = "proto-ipv6")] let ip_repr = Ipv6Repr {
             src_addr,
             dst_addr,
             next_header: IpProtocol::Udp,
@@ -4661,28 +4617,24 @@ mod test {
         let payload = packet.into_inner();
 
         // Expected packets
-        #[cfg(feature = "proto-ipv6")]
-        let expected_icmp_repr = Icmpv6Repr::DstUnreachable {
+        #[cfg(feature = "proto-ipv6")] let expected_icmp_repr = Icmpv6Repr::DstUnreachable {
             reason: Icmpv6DstUnreachable::PortUnreachable,
             header: ip_repr,
             data: &payload[..MAX_PAYLOAD_LEN],
         };
-        #[cfg(feature = "proto-ipv6")]
-        let expected_ip_repr = Ipv6Repr {
+        #[cfg(feature = "proto-ipv6")] let expected_ip_repr = Ipv6Repr {
             src_addr: dst_addr,
             dst_addr: src_addr,
             next_header: IpProtocol::Icmpv6,
             hop_limit: 64,
             payload_len: expected_icmp_repr.buffer_len(),
         };
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
-        let expected_icmp_repr = Icmpv4Repr::DstUnreachable {
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let expected_icmp_repr = Icmpv4Repr::DstUnreachable {
             reason: Icmpv4DstUnreachable::PortUnreachable,
             header: ip_repr,
             data: &payload[..MAX_PAYLOAD_LEN],
         };
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
-        let expected_ip_repr = Ipv4Repr {
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let expected_ip_repr = Ipv4Repr {
             src_addr: dst_addr,
             dst_addr: src_addr,
             next_header: IpProtocol::Icmp,
@@ -4705,16 +4657,12 @@ mod test {
         // The expected packet and the generated packet are equal
         #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
         assert_eq!(
-            iface
-                .inner
-                .process_udp(&mut sockets, ip_repr.into(), false, payload),
+            iface.inner.process_udp(&mut sockets, ip_repr.into(), false, payload),
             Some(IpPacket::Icmpv4((expected_ip_repr, expected_icmp_repr)))
         );
         #[cfg(feature = "proto-ipv6")]
         assert_eq!(
-            iface
-                .inner
-                .process_udp(&mut sockets, ip_repr.into(), false, payload),
+            iface.inner.process_udp(&mut sockets, ip_repr.into(), false, payload),
             Some(IpPacket::Icmpv6((expected_ip_repr, expected_icmp_repr)))
         );
     }
@@ -4748,9 +4696,7 @@ mod test {
 
         // Ensure an ARP Request for us triggers an ARP Reply
         assert_eq!(
-            iface
-                .inner
-                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Reply,
                 source_hardware_addr: local_hw_addr,
@@ -4823,9 +4769,7 @@ mod test {
 
         // Ensure an Neighbor Solicitation triggers a Neighbor Advertisement
         assert_eq!(
-            iface
-                .inner
-                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             Some(EthernetPacket::Ip(IpPacket::Icmpv6((
                 ipv6_expected,
                 icmpv6_expected
@@ -4870,9 +4814,7 @@ mod test {
 
         // Ensure an ARP Request for someone else does not trigger an ARP Reply
         assert_eq!(
-            iface
-                .inner
-                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             None
         );
 
@@ -4888,11 +4830,9 @@ mod test {
     }
 
     #[test]
-    #[cfg(all(
-        feature = "medium-ethernet",
-        feature = "proto-ipv4",
-        not(feature = "medium-ieee802154")
-    ))]
+    #[cfg(all(feature = "medium-ethernet",
+    feature = "proto-ipv4",
+    not(feature = "medium-ieee802154")))]
     fn test_arp_flush_after_update_ip() {
         let (mut iface, mut sockets, _device) = create_ethernet();
 
@@ -4922,9 +4862,7 @@ mod test {
 
         // Ensure an ARP Request for us triggers an ARP Reply
         assert_eq!(
-            iface
-                .inner
-                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Reply,
                 source_hardware_addr: local_hw_addr,
@@ -5041,15 +4979,9 @@ mod test {
             new_addrs.extend(addrs.to_vec());
             *addrs = From::from(new_addrs);
         });
-        assert!(iface
-            .inner
-            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002)));
-        assert!(iface
-            .inner
-            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0xffff)));
-        assert!(!iface
-            .inner
-            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0003)));
+        assert!(iface.inner.has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002)));
+        assert!(iface.inner.has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0xffff)));
+        assert!(!iface.inner.has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0003)));
     }
 
     #[test]
@@ -5121,27 +5053,24 @@ mod test {
         fn recv_igmp(device: &mut Loopback, timestamp: Instant) -> Vec<(Ipv4Repr, IgmpRepr)> {
             let caps = device.capabilities();
             let checksum_caps = &caps.checksum;
-            recv_all(device, timestamp)
-                .iter()
-                .filter_map(|frame| {
-                    let ipv4_packet = match caps.medium {
-                        #[cfg(feature = "medium-ethernet")]
-                        Medium::Ethernet => {
-                            let eth_frame = EthernetFrame::new_checked(frame).ok()?;
-                            Ipv4Packet::new_checked(eth_frame.payload()).ok()?
-                        }
-                        #[cfg(feature = "medium-ip")]
-                        Medium::Ip => Ipv4Packet::new_checked(&frame[..]).ok()?,
-                        #[cfg(feature = "medium-ieee802154")]
-                        Medium::Ieee802154 => todo!(),
-                    };
-                    let ipv4_repr = Ipv4Repr::parse(&ipv4_packet, checksum_caps).ok()?;
-                    let ip_payload = ipv4_packet.payload();
-                    let igmp_packet = IgmpPacket::new_checked(ip_payload).ok()?;
-                    let igmp_repr = IgmpRepr::parse(&igmp_packet).ok()?;
-                    Some((ipv4_repr, igmp_repr))
-                })
-                .collect::<Vec<_>>()
+            recv_all(device, timestamp).iter().filter_map(|frame| {
+                let ipv4_packet = match caps.medium {
+                    #[cfg(feature = "medium-ethernet")]
+                    Medium::Ethernet => {
+                        let eth_frame = EthernetFrame::new_checked(frame).ok()?;
+                        Ipv4Packet::new_checked(eth_frame.payload()).ok()?
+                    }
+                    #[cfg(feature = "medium-ip")]
+                    Medium::Ip => Ipv4Packet::new_checked(&frame[..]).ok()?,
+                    #[cfg(feature = "medium-ieee802154")]
+                    Medium::Ieee802154 => todo!(),
+                };
+                let ipv4_repr = Ipv4Repr::parse(&ipv4_packet, checksum_caps).ok()?;
+                let ip_payload = ipv4_packet.payload();
+                let igmp_packet = IgmpPacket::new_checked(ip_payload).ok()?;
+                let igmp_repr = IgmpRepr::parse(&igmp_packet).ok()?;
+                Some((ipv4_repr, igmp_repr))
+            }).collect::<Vec<_>>()
         }
 
         let groups = [
@@ -5154,9 +5083,7 @@ mod test {
         // Join multicast groups
         let timestamp = Instant::now();
         for group in &groups {
-            iface
-                .join_multicast_group(&mut device, *group, timestamp)
-                .unwrap();
+            iface.join_multicast_group(&mut device, *group, timestamp).unwrap();
         }
 
         let reports = recv_igmp(&mut device, timestamp);
@@ -5184,12 +5111,10 @@ mod test {
         {
             // Transmit GENERAL_QUERY_BYTES into loopback
             let tx_token = device.transmit().unwrap();
-            tx_token
-                .consume(timestamp, GENERAL_QUERY_BYTES.len(), |buffer| {
-                    buffer.copy_from_slice(GENERAL_QUERY_BYTES);
-                    Ok(())
-                })
-                .unwrap();
+            tx_token.consume(timestamp, GENERAL_QUERY_BYTES.len(), |buffer| {
+                buffer.copy_from_slice(GENERAL_QUERY_BYTES);
+                Ok(())
+            }).unwrap();
         }
         // Trigger processing until all packets received through the
         // loopback have been processed, including responses to
@@ -5200,9 +5125,7 @@ mod test {
         // Leave multicast groups
         let timestamp = Instant::now();
         for group in &groups {
-            iface
-                .leave_multicast_group(&mut device, *group, timestamp)
-                .unwrap();
+            iface.leave_multicast_group(&mut device, *group, timestamp).unwrap();
         }
 
         let leaves = recv_igmp(&mut device, timestamp);
@@ -5222,8 +5145,7 @@ mod test {
         let (mut iface, mut sockets, _device) = create();
 
         let packets = 1;
-        let rx_buffer =
-            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
+        let rx_buffer = raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
         let tx_buffer = raw::PacketBuffer::new(
             vec![raw::PacketMetadata::EMPTY; packets],
             vec![0; 48 * packets],
@@ -5310,8 +5232,7 @@ mod test {
         assert!(socket.can_send());
 
         let packets = 1;
-        let raw_rx_buffer =
-            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
+        let raw_rx_buffer = raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
         let raw_tx_buffer = raw::PacketBuffer::new(
             vec![raw::PacketMetadata::EMPTY; packets],
             vec![0; 48 * packets],
@@ -5350,8 +5271,7 @@ mod test {
         };
 
         // Emit to frame
-        let mut bytes =
-            vec![0u8; ipv4_repr.buffer_len() + udp_repr.header_len() + UDP_PAYLOAD.len()];
+        let mut bytes = vec![0u8; ipv4_repr.buffer_len() + udp_repr.header_len() + UDP_PAYLOAD.len()];
         let frame = {
             ipv4_repr.emit(
                 &mut Ipv4Packet::new_unchecked(&mut bytes),
@@ -5393,50 +5313,47 @@ mod test {
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_normal_poll() {
-       use crate::socket::tcp::test::{
-           socket_established_with_endpoints, TestSocket};
-       use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
-       use crate::iface::mock;
-       use crate::socket::tcp_ohua::test::{
-           ohua_socket_established_with_endpoints, OhuaTestSocket};
-       //smoltcp - the usual way
-       let (mut iface1, mut sockets1, mut device1) = create();
+        use crate::socket::tcp::test::{
+            socket_established_with_endpoints, TestSocket};
+        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
+        //smoltcp - the usual way
+        net_debug!("\n Normal poll");
+        let (mut iface1, mut sockets1, mut device1) = create();
 
-       let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
-           IpEndpoint {
-               addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-               port: 80
-           },
-           IpEndpoint {
-               addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-               port: 49500
-           });
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
 
-       //iface1.inner = Some(cx);
-       // Devices sending buffer should be empty
-       assert!(device1.empty_tx());
+        //iface1.inner = Some(cx);
+        // Devices sending buffer should be empty
+        assert!(device1.empty_tx());
 
-       let tcp_socket_handle1 = sockets1.add(socket);
+        let tcp_socket_handle1 = sockets1.add(socket);
 
-       let socket1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1);
-       assert!(!socket1.can_recv());
-       assert!(socket1.may_send());
-       assert!(socket1.can_send());
-       // Sockets sending buffer should be empty before sending
-       assert!(socket1.send_queue() == 0);
+        let socket1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1);
+        assert!(!socket1.can_recv());
+        assert!(socket1.may_send());
+        assert!(socket1.can_send());
+        // Sockets sending buffer should be empty before sending
+        assert!(socket1.send_queue() == 0);
 
-       let timestamp = Instant::now();
-       let msg = "hello".as_bytes();
-       let msg_len = msg.len();
-       // Enqueue the message in the sockets sending buffer
-       let result_len = socket1.send_slice(msg);
-       assert_eq!(result_len, Ok(msg_len));
-       net_debug!("running egress");
-       let (had_egress, last_socket_result) =
-           iface1.test_poll(timestamp, &mut device1, &mut sockets1);
-       assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
-       // Make sure the data arrived at the device level:
-       /* socket_egress gets a sending token from the device, passes is through
+        let timestamp = Instant::now();
+        let msg = "hello".as_bytes();
+        let msg_len = msg.len();
+        // Enqueue the message in the sockets sending buffer
+        let result_len = socket1.send_slice(msg);
+        assert_eq!(result_len, Ok(msg_len));
+        net_debug!("running egress");
+        let (had_egress, last_socket_result) = iface1.test_poll(timestamp, &mut device1, &mut sockets1);
+        assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
+        // Make sure the data arrived at the device level:
+        /* socket_egress gets a sending token from the device, passes is through
          socket.dispatch() and (in this case) device.transmi()
          -> inner_interface.dispatch()
          -> inner_interface.dispatch_ip()
@@ -5445,12 +5362,12 @@ mod test {
          The consume function for Loopback interfaces causes the assembled packet representation
          to be pushed to the devices Tx queue. So that's where we'd expect to see the packet afterwards
          */
-       // TODO: I need a function to build the comparison packet
-            // (btw. mock packets seem to be needed quite often so ...
-       // Devices sending buffer dosn't contain packet any more since it's a
+        // TODO: I need a function to build the comparison packet
+        // (btw. mock packets seem to be needed quite often so ...
+        // Devices sending buffer dosn't contain packet any more since it's a
         // Loopback and the packet has already been returned
-       assert_eq!(0, device1.num_tx_packets());
-   }
+        assert_eq!(0, device1.num_tx_packets());
+    }
 
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
@@ -5458,34 +5375,34 @@ mod test {
         // OHUA: Version
         net_debug!("\n Ohua State driven poll");
         let (mut iface, _sockets, mut device) = create();
-        let OhuaTestSocket{socket, cx:_cx} =
-            ohua_socket_established_with_endpoints(
-                IpEndpoint{
-                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                    port: 80
-                },
-                IpEndpoint {
-                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                    port: 49500} );
+        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
 
 
         // Devices sending buffer should be empty
         assert!(device.empty_tx());
 
-        let tcp_socket_handle2 = iface.add_socket(socket);
+        let tcp_socket_handle = iface.add_socket(socket);
 
-        let socket2 = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle2);
+        let socket = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
 
         // Sockets sending buffer should be empty before sending
-        assert!(!socket2.can_recv());
-        assert!(socket2.may_send());
-        assert!(socket2.can_send());
-        assert!(socket2.send_queue()==0);
+        assert!(!socket.can_recv());
+        assert!(socket.may_send());
+        assert!(socket.can_send());
+        assert!(socket.send_queue() == 0);
 
         let timestamp = Instant::now();
         let msg = "hello".as_bytes().to_vec();
-        let msg_len = msg.len();
-        let messages = vec![(tcp_socket_handle2, msg.clone())];
+
+        let messages = vec![(tcp_socket_handle, msg.clone())];
         let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
         assert!(Either::is_left(&dev_transmit_call));
         let call = dev_transmit_call.left_or_panic();
@@ -5507,7 +5424,7 @@ mod test {
         assert_eq!(device.num_tx_packets(), 1);
         assert_eq!(iface.emitted_any, false);
 
-       /*
+        /*
         // Again make sure the data arrived at the device level:
         // Devices sending buffer should contain our packet
         assert_eq!(1, device2.num_tx_packets());
@@ -5515,20 +5432,20 @@ mod test {
 
        // compare the states of both sockets
        let s1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1).state();
-       let s2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle2).state();
+       let s2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle).state();
        assert_eq!(s1, s2);*/
-
     }
-    /*
+
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_ohua_simple_poll_works() {
-        // Just check that the current version of poll rewrite works
-        // We use the normal interface here
-        let (mut iface, mut sockets, mut device) = create();
+    fn test_ohua_normal_no_packet() {
+        use crate::socket::tcp::test::{
+            socket_established_with_endpoints, TestSocket};
+        //smoltcp - the usual way
+        net_debug!("\n Normal poll - no packet");
+        let (mut iface1, mut sockets1, mut device1) = create();
 
-        // we take an Ohua socket cause we want to use dispatch_before later
-        let OhuaTestSocket { socket, cx:_cx } = ohua_socket_established_with_endpoints(
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -5538,97 +5455,188 @@ mod test {
                 port: 49500
             });
 
-        let tcp_socket_handle1 = sockets.add(socket);
+        //iface1.inner = Some(cx);
+        // Devices sending buffer should be empty
+        assert!(device1.empty_tx());
 
-        let socket1 = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle1);
-        let msg = "hello".as_bytes();
-        let msg_len = msg.len();
-        let result_len = socket1.send_slice(msg);
-        assert_eq!(result_len, Ok(msg_len));
+        let tcp_socket_handle1 = sockets1.add(socket);
+
+        let socket1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1);
+        assert!(!socket1.can_recv());
+        assert!(socket1.may_send());
+        assert!(socket1.can_send());
+        // Sockets sending buffer should be empty before sending
+        assert!(socket1.send_queue() == 0);
+
         let timestamp = Instant::now();
-        // There is egress when there should be
-        let (poll_result, last_socket_egress_result, _used_sockets) =
-            iface.simple_poll_outer(timestamp, &mut device, sockets);
-        assert_eq!(poll_result, Ok(true));
-        assert_eq!(last_socket_egress_result, Ok(()));
-        // We expect no packets in the device, because we called
-        // ingress on a loopback so the message will be gone again
-        assert_eq!(0, device.num_tx_packets());
+        // No message inserted here
+        net_debug!("running egress");
+        let (had_egress, last_socket_result) = iface1.test_poll(timestamp, &mut device1, &mut sockets1);
+        assert_eq!((had_egress, last_socket_result), (Ok(false), Ok(())));
+        assert_eq!(device1.num_tx_packets(), 0);
     }
 
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_ohua_simple_poll_no_packet() {
-        //This time without packets -> polling should return Ok(false)
-        let (mut iface, mut sockets, mut device) = create();
-                let OhuaTestSocket{socket, cx:_cx} = ohua_socket_established_with_endpoints(
-                                IpEndpoint{
-                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                    port: 80
-                },
-                IpEndpoint {
-                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                    port: 49500} );
-        // we add a socket but no message
-        let _handle = sockets.add(socket);
+    fn test_ohua_poll_no_packet() {
+        // OHUA: Version; This time with no packet, polling should return false
+        net_debug!("\n Ohua State driven poll - No packet");
+        let (mut iface, _sockets, device) = create();
+        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
+
+
+        // Devices sending buffer should be empty
+        assert!(device.empty_tx());
+
+        let tcp_socket_handle = iface.add_socket(socket);
+
+        let socket2 = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+
+        // Sockets sending buffer should be empty before sending
+        assert!(!socket2.can_recv());
+        assert!(socket2.may_send());
+        assert!(socket2.can_send());
+        assert!(socket2.send_queue() == 0);
 
         let timestamp = Instant::now();
-        let (poll_result, last_socket_egress_result, _used_sockets) =
-            iface.simple_poll_outer(timestamp, &mut device, sockets);
-        assert_eq!(poll_result, Ok(false));
-        assert_eq!(last_socket_egress_result, Ok(()));
-        assert_eq!(0, device.num_tx_packets());
-    }*/
-    /*
+        let messages = vec![];
+        // We do not get a device call, because there was nothign to send
+        let poll_result_and_messages = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
+        assert!(Either::is_right(&poll_result_and_messages));
+        let (poll_result, messages) = poll_result_and_messages.right_or_panic();
+        assert_eq!(poll_result, false);
+        // We don't have ingress right now, so mmessages should be empty
+        assert_eq!(messages, vec![]);
+        // The device should obviously  have no packet also
+        assert_eq!(device.num_tx_packets(), 0);
+        assert_eq!(iface.emitted_any, false);
+    }
+
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_ohua_simple_poll_wrong_socket_state() {
-        //This time without packets -> polling should return Ok(false)
-        let (mut iface, mut sockets, mut device) = create();
-        let OhuaTestSocket{socket, cx: _cx} =
-            ohua_socket_closing_with_endpoints(
-                IpEndpoint{
-                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                    port: 80
-                },
-                IpEndpoint {
-                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                    port: 49500} );
+    fn test_ohua_normal_wrong_socket_state() {
+        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
+        //smoltcp - the usual way
+        net_debug!("\n Normal poll - Closing Socket");
+        let (mut iface1, mut sockets1, mut device1) = create();
 
-        let tcp_socket_handle = sockets.add(socket);
-        // we add a socket, prepare a messaeg but nothing should happen
-        // because the socket is in the wrong state and shouldn't produce a packet
-        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_closing_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
+
+        //iface1.inner = Some(cx);
+        // Devices sending buffer should be empty
+        assert!(device1.empty_tx());
+
+        let tcp_socket_handle1 = sockets1.add(socket);
+
+        let socket1 = sockets1.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle1);
+        assert!(!socket1.can_recv());
+        assert!(!socket1.may_send());
+        assert!(!socket1.can_send());
+        // Sockets sending buffer should be empty before sending
+        assert!(socket1.send_queue() == 0);
+        let timestamp = Instant::now();
         let msg = "hello".as_bytes();
-        let result = socket.send_slice(msg);
+        // Enqueue the message in the sockets sending buffer
+        let result = socket1.send_slice(msg);
         assert!(result.is_err());
-        let timestamp = Instant::now();
-        let (poll_result, last_egress_result) = iface
-            .test_poll( timestamp, &mut device, &mut sockets);
-        // We get a true here, because of ingress. This is the same
-        //  with the normal poll, so it is valid.
-        assert_eq!(poll_result, Ok(true));
-        // Wrong socket state will just yield an early return Ok()
-        assert_eq!(last_egress_result, Ok(()));
-        assert_eq!(0, device.num_tx_packets());
+        // ToDo: I can not call send on a closing socket. However in the
+        //       app loop, listen is called on sockets
+        //       Check if Socket State is different for normal version
+        //       sockets and loaded/unloaded sockets in the Ohua version
+        let (had_egress, last_socket_result) = iface1.test_poll(timestamp, &mut device1, &mut sockets1);
+        // We have egress because we send an ACK
+        assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
+        assert_eq!(device1.num_tx_packets(), 0);
     }
 
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_ohua_simple_poll_exhausted_device() {
-        net_debug!("TEST DEVICE EXHAUSTED");
+    fn test_ohua_state_poll_wrong_socket_state() {
+        // OHUA: Version; This time with closing socket -> no polling activity
+        net_debug!("\n Ohua State driven poll - Closing Socket");
+        let (mut iface, _sockets, mut device) = create();
+        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_closing_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
+
+        // Devices sending buffer should be empty
+        assert!(device.empty_tx());
+
+        let tcp_socket_handle = iface.add_socket(socket);
+
+        let socket = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        // Sockets sending buffer should be empty before sending
+        assert!(!socket.can_recv());
+        assert!(!socket.may_send());
+        assert!(!socket.can_send());
+        assert!(socket.send_queue() == 0);
+
+        let timestamp = Instant::now();
+        let msg = "hello".as_bytes().to_vec();
+        let messages = vec![(tcp_socket_handle, msg.clone())];
+        // We still get a device call, because an ACK is send
+        let left_device_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
+        assert!(Either::is_left(&left_device_call));
+        let dev_call = left_device_call.left_or_panic();
+        assert_eq!(dev_call, DeviceCall::Transmit());
+        let iface_call = device.process_call(dev_call);
+        assert_eq!(iface_call, InterfaceCall::InnerDispatchLocal(Some(())));
+        let dev_send_call = iface.process_call::<Loopback>(iface_call);
+        assert!(Either::is_left(&dev_send_call));
+        let dev_call = dev_send_call.left_or_panic();
+        let iface_call_post_process = device.process_call(dev_call);
+        assert_eq!(iface_call_post_process, InterfaceCall::MatchSocketDispatchAfter(Ok(())));
+        let poll_result_and_messages = iface.process_call::<Loopback>(iface_call_post_process);
+        assert!(Either::is_right(&poll_result_and_messages));
+        let (poll_result, messages) = poll_result_and_messages.right_or_panic();
+        // Poll result is true because we send an ACK
+        assert_eq!(poll_result, true);
+        // We don't have ingress right now, so mmessages should be empty
+        assert_eq!(messages, vec![]);
+        // Also, because of lacking ingress, the device should have one packet now
+        assert_eq!(device.num_tx_packets(), 1);
+        assert_eq!(iface.emitted_any, false);
+    }
+
+
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_ohua_normal_exhausted_device() {
+        net_debug!("\n Normal poll - Exhausted device");
         //This time without packets -> polling should return Ok(false)
         let (mut iface, mut sockets, mut device) = create_ethernet_exhausted_device();
         assert!(device.transmit().is_none());
-        let OhuaTestSocket{socket, cx:_cx} =
-            ohua_socket_established_with_endpoints(
-                IpEndpoint{
-                    addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                    port: 80
-                },
-                IpEndpoint {
-                    addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                    port: 49500} );
+        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
 
         let tcp_socket_handle = sockets.add(socket);
         // we add a socket, prepare a message but nothing should happen
@@ -5639,12 +5647,56 @@ mod test {
         let result_len = socket.send_slice(msg);
         assert_eq!(result_len, Ok(msg_len));
         let timestamp = Instant::now();
-        let (poll_result, last_socket_egress_result, _used_sockets) =
-            iface.simple_poll_outer( timestamp, &mut device, sockets);
+        let (poll_result, last_socket_egress_result) = iface.test_poll(timestamp, &mut device, &mut sockets);
         assert_eq!(poll_result, Ok(false));
         assert_eq!(last_socket_egress_result, Err(Error::Exhausted));
-        assert_eq!(0, device.num_tx_packets());
+        assert_eq!(device.num_tx_packets(), 0);
     }
-    */
 
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_ohua_states_exhausted_device() {
+        net_debug!("\n Ohua State driven poll - Exhausted Device");
+        //This time without packets -> polling should return Ok(false)
+        let (mut iface, _sockets, mut device) = create_ethernet_exhausted_device();
+        assert!(device.transmit().is_none());
+        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
+
+                // Devices sending buffer should be empty
+        assert!(device.empty_tx());
+
+        let tcp_socket_handle = iface.add_socket(socket);
+
+        let socket = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+
+        // Sockets sending buffer should be empty before sending
+        assert!(!socket.can_recv());
+        assert!(socket.may_send());
+        assert!(socket.can_send());
+        assert!(socket.send_queue() == 0);
+
+        let timestamp = Instant::now();
+        let msg = "hello".as_bytes().to_vec();
+
+        let messages = vec![(tcp_socket_handle, msg.clone())];
+        let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
+        assert!(Either::is_left(&dev_transmit_call));
+        let call = dev_transmit_call.left_or_panic();
+        assert_eq!(call, DeviceCall::Transmit());
+        let iface_call = device.process_call(call);
+        assert_eq!(iface_call, InterfaceCall::InnerDispatchLocal(None));
+        let dev_call_or_result = iface.process_call::<Loopback>(iface_call);
+        assert!(Either::is_right(&dev_call_or_result));
+        let (poll_result, messages) = dev_call_or_result.right_or_panic();
+        assert_eq!(poll_result, false);
+        assert_eq!(messages, vec![]);
+    }
 }
