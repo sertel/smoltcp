@@ -241,6 +241,13 @@ struct EgressState<'es>{
     current_postsend_packet:Option< (TcpReprP, IpRepr, bool)>
 }
 
+struct IngressState<'es>{
+    // We keep the interfaces sockets here during egress to mimic
+    // the situation that the socket reference would be borrowed during egress
+    // and becomes usable in  poll afterward
+    sockets_during_egress: Option<SocketSet<'es>>,
+}
+
 /// The device independent part of an Ethernet network interface.
 ///
 /// Separating the device from the data required for processing and dispatching makes
@@ -1375,9 +1382,72 @@ impl<'a> Interface<'a> {
         (Ok(readiness_may_have_changed), temp_canarie)
     }
 
+    /// Yet another poll version to be able to test ingress modification
+    /// since I currently don't have time to figuer out thhe correct instantiation
+    /// of Ingress'able interface and sockets
+    pub fn test_poll_ingress<D>(
+        &mut self,
+        timestamp: Instant,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+    ) -> (Result<bool>, Result<()>)
+    where
+        D: for<'d> Device<'d>,
+    {
+        self.inner.now = timestamp;
+        let mut temp_canarie = Ok(());
+        let mut emitted_any;
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .ipv4_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return (Err(e), temp_canarie);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        if let Err(e) = self
+            .fragments
+            .sixlowpan_fragments
+            .remove_when(|frag| Ok(timestamp >= frag.expires_at()?))
+        {
+            return (Err(e), temp_canarie);
+        }
+
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        match self.sixlowpan_egress(device) {
+            Ok(true) => return (Ok(true), temp_canarie),
+            Err(e) => return (Err(e), temp_canarie),
+            _ => (),
+        }
+
+        let mut readiness_may_have_changed = false;
+
+        loop {
+            let processed_any = self.socket_ingress_state_separated(device, sockets);
+            net_debug!("Processed any was {}", processed_any);
+            (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
+            net_debug!("Emitted any was {}, canary was {:?}", emitted_any, temp_canarie);
+            #[cfg(feature = "proto-igmp")]
+            let igmp_result = self.igmp_egress(device);
+            if igmp_result.is_err() {
+                return (igmp_result, temp_canarie)
+            }
+
+            if processed_any || emitted_any {
+                readiness_may_have_changed = true;
+            } else {
+                break;
+            }
+        }
+        net_debug!("Returning readiness changed: {}, canary: {:?}", readiness_may_have_changed, temp_canarie);
+        (Ok(readiness_may_have_changed), temp_canarie)
+    }
 
 
-        /// Get the HardwareAddress address of the interface.
+
+    /// Get the HardwareAddress address of the interface.
     ///
     /// # Panics
     /// This function panics if the medium is not Ethernet or Ieee802154.
@@ -1654,6 +1724,83 @@ impl<'a> Interface<'a> {
             }
         }
 
+        processed_any
+    }
+
+    fn socket_ingress_state_separated<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
+    where
+        D: for<'d> Device<'d>,
+    {
+        let mut processed_any = false;
+        let Self {
+            inner,
+            fragments: ref mut _fragments,
+            out_packets: _out_packets,
+            ..
+        } = self;
+
+        if let Some((rx_token, tx_token)) = device.receive() {
+            let buffer = Rc::new(RefCell::new(vec![]));
+            let other_handle = buffer.clone();
+            let local_token = LocalTxToken{buffer};
+            let mut received_frame = vec![];
+            let receiving_result  =
+                rx_token.consume(inner.now,
+                                 |frame| {received_frame.extend_from_slice(frame); Ok(())});
+
+            // Process ingress packgage locally and
+            // write possible response package to local token instead
+            // of sending it
+            let mut responded = false;
+            match inner.caps.medium {
+                #[cfg(feature = "medium-ethernet")]
+                Medium::Ethernet => {
+                    if let Some(packet) = inner.process_ethernet(sockets, &received_frame, _fragments) {
+                        if let Err(err) = inner.dispatch(local_token, packet) {
+                            net_debug!("Failed to send response: {}", err);
+                        } else {
+                            responded = true;
+                        }
+                    }
+                }
+                #[cfg(feature = "medium-ip")]
+                Medium::Ip => {
+                    if let Some(packet) = inner.process_ip(sockets, &received_frame, _fragments) {
+                        if let Err(err) = inner.dispatch_ip(local_token, packet, None) {
+                            net_debug!("Failed to send response: {}", err);
+                        } else {
+                            responded = true;
+                        }
+                    }
+                }
+                #[cfg(feature = "medium-ieee802154")]
+                Medium::Ieee802154 => {
+                    if let Some(packet) = inner.process_ieee802154(sockets, &received_frame, _fragments) {
+                        if let Err(err) = inner.dispatch_ip(local_token, packet, Some(_out_packets)) {
+                            net_debug!("Failed to send response: {}", err);
+                        } else {
+                            responded = true;
+                        }
+                    }
+                }
+            };
+            // processed any is set to true as soon as rx_token.consume is called,
+            // independent of the result
+            processed_any = true;
+
+            // now we still need to send the reponse if there was one
+            if responded {
+                let response = other_handle.take();
+                if let Err(err) = tx_token.consume(inner.now, response.len(),
+                                                   |sending_buffer| Ok(sending_buffer.clone_from_slice(&response))){
+                     net_debug!("Failed to send response: {}", err);
+                };
+            };
+
+            if let Err(err) = receiving_result {
+                net_debug!("Failed to consume RX token: {}", err);
+            }
+        }
         processed_any
     }
 
@@ -5349,7 +5496,6 @@ mod test {
         // Enqueue the message in the sockets sending buffer
         let result_len = socket1.send_slice(msg);
         assert_eq!(result_len, Ok(msg_len));
-        net_debug!("running egress");
         let (had_egress, last_socket_result) = iface1.test_poll(timestamp, &mut device1, &mut sockets1);
         assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
         // Make sure the data arrived at the device level:
@@ -5366,6 +5512,44 @@ mod test {
         // (btw. mock packets seem to be needed quite often so ...
         // Devices sending buffer dosn't contain packet any more since it's a
         // Loopback and the packet has already been returned
+        assert_eq!(0, device1.num_tx_packets());
+    }
+    #[test]
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
+    fn test_ohua_ingress_modified_poll() {
+        use crate::socket::tcp::test::{
+            socket_established_with_endpoints, TestSocket};
+        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
+        //smoltcp - the usual way
+        net_debug!("\n Normal poll - Ingress modified");
+        let (mut iface1, mut sockets1, mut device1) = create();
+
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500
+            });
+
+        //iface1.inner = Some(cx);
+        // Devices sending buffer should be empty
+        assert!(device1.empty_tx());
+
+        let tcp_socket_handle1 = sockets1.add(socket);
+
+        let socket1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1);
+
+        let timestamp = Instant::now();
+        let msg = "hello".as_bytes();
+        // Enqueue the message in the sockets sending buffer
+        let _result_len = socket1.send_slice(msg);
+
+        let (had_egress, last_socket_result) = iface1.test_poll_ingress(
+            timestamp, &mut device1, &mut sockets1);
+        assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
         assert_eq!(0, device1.num_tx_packets());
     }
 
