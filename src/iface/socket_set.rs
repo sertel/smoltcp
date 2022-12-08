@@ -131,7 +131,6 @@ impl<'s> SocketSet<'s> {
    }
 
    pub fn get_mut_item(&mut self, handle: usize) -> Option<&mut Item<'s>> {
-        net_trace!("[{}]: removing item", handle);
         self.sockets[handle].inner.as_mut()
    }
 
