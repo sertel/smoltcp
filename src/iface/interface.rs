@@ -23,6 +23,7 @@ use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
+use crate::iface::InterfaceCall::InitEgress;
 
 use crate::wire::ip::{Address};
 
@@ -68,6 +69,10 @@ pub type Messages = Vec<(SocketHandle, Vec<u8>)>;
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum InterfaceCall{
     InitPoll(Messages, Instant),
+    InitIngress,
+    // ToDo: This represents the received data, the receive result and the tx token but probably there is a nicer way to do this.
+    ProcessIngress(Option<(Vec<u8>, Result<()>, Option<()>)>),
+    LoopIngress(Result<()>),
     InitEgress,
     PollLoopCondition,
     // Todo: To avoid the hassle with dyn Device::Token we use a simple ok for
@@ -81,9 +86,28 @@ pub enum InterfaceCall{
     UpdateEgressState
 }
 
-// ToDo: ReprP is just a conversion from Repr made in
-//  dispatch_before_optn -> check if that makes sense or should be moved
-//  downstream where it's needed
+// Calls to device overlap for Ingress and
+// Egress so we could:
+// 1. set this state
+// in the interface and have an
+// InterfaceCall::ProcessSendResult that
+// dispatches between the egress and the ingress handling
+// 2. just send the
+// state flag to the device and do the
+// decission there returning two
+// different InterfaceCalls depending on the flag or
+// 3. have tow distinct device calls.
+// I assume that a merging algorithm over the controle/data flow graphs
+// would derive option 1, noticing that the same function on the
+// device is called with the same arguments
+// ToDo: I'll start with second option. Maybe refactor to first.
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum InterfaceState{
+    Egress,
+    Ingress
+}
+
 type PacketTwice = ((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool));
 
 fn is_packet(maybe_packet: &Either<PacketTwice, Result<()>>)
@@ -219,6 +243,7 @@ pub struct Interface<'a> {
     // We will probably replace this by a
     // State = Option<Ingress{}> | Option<Egress{}>
     current_egress_state: Option<EgressState<'a>>,
+    current_ingress_state: Option<IngressState<'a>>,
     sockets:Option<SocketSet<'a>>,
     emitted_any:bool,
     processed_any:bool,
@@ -245,7 +270,7 @@ struct IngressState<'es>{
     // We keep the interfaces sockets here during egress to mimic
     // the situation that the socket reference would be borrowed during egress
     // and becomes usable in  poll afterward
-    sockets_during_egress: Option<SocketSet<'es>>,
+    sockets_during_ingress: Option<SocketSet<'es>>,
 }
 
 /// The device independent part of an Ethernet network interface.
@@ -659,6 +684,7 @@ let iface = builder.finalize(&mut device);
                 rand,
             },
             current_egress_state:None,
+            current_ingress_state:None,
             sockets:Some(self.sockets),
             emitted_any: false,
             processed_any: false,
@@ -1037,7 +1063,46 @@ impl<'a> Interface<'a> {
                 // and either loops back to `InterFaceCall::PollLoop` or returns
                 // the result of polling
                 // For now we don't have ingress so I'll jump ahead to Egress
-                return self.process_call::<D>(InterfaceCall::InitEgress)
+                return self.process_call::<D>(InterfaceCall::InitIngress)
+            },
+            InterfaceCall::InitIngress => {
+                net_debug!("Socket Ingress");
+                self.processed_any = false;
+                self.current_ingress_state = Some(
+                    IngressState{
+                        sockets_during_ingress: self.sockets.take()
+                    }
+                );
+                return Either::Left(DeviceCall::Receive(self.inner.now))
+            },
+            InterfaceCall::ProcessIngress(maybe_ingress)  => {
+                if let Some((frame, receive_result, tx_token))= maybe_ingress{
+                    // processed any is true as soon as some
+                    // rx_token.consume is called
+                    let mut sockets = self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.take().unwrap();
+                    let processed_packet = self.process_ingress(&mut sockets, frame, receive_result, tx_token);
+                    self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.replace(sockets);
+                    self.processed_any = true;
+                    if processed_packet.is_some() {
+                        return Either::Left(DeviceCall::Consume(self.inner.now, processed_packet.unwrap(), InterfaceState::Ingress))
+                    } else {
+                        return Either::Left(DeviceCall::Receive(self.inner.now))
+                    }
+                } else {
+                   // Nothing left to receive ->
+                   // give the sockets back and call egress
+                    let sockets = self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.take().unwrap();
+                    self.sockets.replace(sockets);
+                    return self.process_call::<D>(InterfaceCall::InitEgress);
+                }
+            },
+            InterfaceCall::LoopIngress(consume_result) => {
+                if let Err(err) = consume_result{
+                        net_debug!("Failed to send response: {}", err);
+                }
+                // directly call device receive again, bringing us back
+                // into the ingress loop
+                return Either::Left(DeviceCall::Receive(self.inner.now))
             },
             InterfaceCall::InitEgress => {
                 net_debug!("Socket Egress");
@@ -1063,7 +1128,7 @@ impl<'a> Interface<'a> {
                     let dispatch_result = self.inner.dispatch_local(current_presend_packet.to_ip_packet(), None);
                     if dispatch_result.is_ok() {
                         let (packet, timest) = dispatch_result.unwrap();
-                        return Either::Left(DeviceCall::Consume(timest, packet))
+                        return Either::Left(DeviceCall::Consume(timest, packet, InterfaceState::Egress))
                     }
                     else {
                         let result = Err(dispatch_result.unwrap_err());
@@ -1113,7 +1178,7 @@ impl<'a> Interface<'a> {
                 let maybe_next_packet = self.iterate_to_next_send();
                 if maybe_next_packet.is_some() {
                     // we remain in the egress loop
-                    return Either::Left(DeviceCall::Transmit())
+                    return Either::Left(DeviceCall::Transmit)
                 }
                 else {
                     // we return to the poll loop
@@ -1201,19 +1266,6 @@ impl<'a> Interface<'a> {
         }
     }
 
-/*
-    fn reset_egress_state(&mut self) -> SocketSet{
-        // this basically ensures that EgressState is None afterwards
-        match self.current_egress_state.take() {
-            None => panic!("Can't return none existing sockets"),
-            Some(_state) => {
-               let sockets = self.current_sockets.take().unwrap();
-               sockets
-            }
-        }
-    }
-
- */
     /*
     fn early_return_fragment_stuff<D>(&mut self, timestamp: Instant, device: &mut D)
     where
@@ -1727,7 +1779,7 @@ impl<'a> Interface<'a> {
         processed_any
     }
 
-    fn socket_ingress_state_separated<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
+    fn  socket_ingress_state_separated<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
     where
         D: for<'d> Device<'d>,
     {
@@ -1739,7 +1791,7 @@ impl<'a> Interface<'a> {
             ..
         } = self;
 
-        if let Some((rx_token, tx_token)) = device.receive() {
+        while let Some((rx_token, tx_token)) = device.receive() {
             let buffer = Rc::new(RefCell::new(vec![]));
             let other_handle = buffer.clone();
             let local_token = LocalTxToken{buffer};
@@ -1802,6 +1854,75 @@ impl<'a> Interface<'a> {
             }
         }
         processed_any
+    }
+
+    fn process_ingress(
+        &mut self,
+        sockets: &mut SocketSet<'_>,
+        received_frame:Vec<u8>,
+        receiving_result: Result<()>,
+        tx_emulated_token : Option<()>,
+    ) -> Option<Vec<u8>>
+    {
+        let Self {
+            inner,
+            fragments: ref mut _fragments,
+            out_packets: _out_packets,
+            ..
+        } = self;
+
+
+        let buffer = Rc::new(RefCell::new(vec![]));
+        let other_handle = buffer.clone();
+        let local_token = LocalTxToken{buffer};
+
+        // Process ingress packgage locally and
+        // write possible response package to local token instead
+        // of sending it
+        let mut responded = false;
+        match inner.caps.medium {
+            #[cfg(feature = "medium-ethernet")]
+            Medium::Ethernet => {
+                if let Some(packet) = inner.process_ethernet(sockets, &received_frame, _fragments) {
+                    if let Err(err) = inner.dispatch(local_token, packet) {
+                        net_debug!("Failed to send response: {}", err);
+                    } else {
+                        responded = true;
+                    }
+                }
+            }
+            #[cfg(feature = "medium-ip")]
+            Medium::Ip => {
+                if let Some(packet) = inner.process_ip(sockets, &received_frame, _fragments) {
+                    if let Err(err) = inner.dispatch_ip(local_token, packet, None) {
+                        net_debug!("Failed to send response: {}", err);
+                    } else {
+                        responded = true;
+                    }
+                }
+            }
+            #[cfg(feature = "medium-ieee802154")]
+            Medium::Ieee802154 => {
+                if let Some(packet) = inner.process_ieee802154(sockets, &received_frame, _fragments) {
+                    if let Err(err) = inner.dispatch_ip(local_token, packet, Some(_out_packets)) {
+                        net_debug!("Failed to send response: {}", err);
+                    } else {
+                        responded = true;
+                    }
+                }
+            }
+        };
+
+        // now we still need to send the reponse if there was one
+        let mut response = None;
+        if responded {
+            response = Some(other_handle.take());
+        };
+
+        if let Err(err) = receiving_result {
+            net_debug!("Failed to consume RX token: {}", err);
+        }
+        response
     }
 
     fn socket_egress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> (bool, Result<()>)
@@ -5590,7 +5711,7 @@ mod test {
         let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
         assert!(Either::is_left(&dev_transmit_call));
         let call = dev_transmit_call.left_or_panic();
-        assert_eq!(call, DeviceCall::Transmit());
+        assert_eq!(call, DeviceCall::Transmit);
         let iface_call = device.process_call(call);
         assert_eq!(iface_call, InterfaceCall::InnerDispatchLocal(Some(())));
         let dev_send_call = iface.process_call::<Loopback>(iface_call);
@@ -5784,7 +5905,7 @@ mod test {
         let left_device_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
         assert!(Either::is_left(&left_device_call));
         let dev_call = left_device_call.left_or_panic();
-        assert_eq!(dev_call, DeviceCall::Transmit());
+        assert_eq!(dev_call, DeviceCall::Transmit);
         let iface_call = device.process_call(dev_call);
         assert_eq!(iface_call, InterfaceCall::InnerDispatchLocal(Some(())));
         let dev_send_call = iface.process_call::<Loopback>(iface_call);
@@ -5874,7 +5995,7 @@ mod test {
         let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
         assert!(Either::is_left(&dev_transmit_call));
         let call = dev_transmit_call.left_or_panic();
-        assert_eq!(call, DeviceCall::Transmit());
+        assert_eq!(call, DeviceCall::Transmit);
         let iface_call = device.process_call(call);
         assert_eq!(iface_call, InterfaceCall::InnerDispatchLocal(None));
         let dev_call_or_result = iface.process_call::<Loopback>(iface_call);

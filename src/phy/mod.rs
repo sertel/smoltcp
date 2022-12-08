@@ -92,7 +92,7 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
 use core::fmt::Debug;
 use crate::time::Instant;
 use crate::{Error, Result};
-use crate::iface::InterfaceCall;
+use crate::iface::{InterfaceCall, InterfaceState};
 
 #[cfg(all(
     any(feature = "phy-raw_socket", feature = "phy-tuntap_interface"),
@@ -326,6 +326,17 @@ pub trait Device<'a> {
     /// need to be sent back, without heap allocation.
     fn receive(&'a mut self) -> Option<(Self::RxToken, Self::TxToken)>;
 
+    /// To simplify things a bit we do not send tokens but merely the info
+    fn simple_receive(&'a mut self, timestamp: Instant
+    ) -> Option<(Vec<u8>, Result<()>, Option<()>)> {
+        if let Some((rx, tx)) = self.receive() {
+            let mut received_frame = vec![];
+            let receiving_result = rx.consume(timestamp, |frame| { received_frame.extend_from_slice(frame); Ok(())});
+            return Some((received_frame, receiving_result, Some(())))
+        } else {
+            None
+        }
+    }
     /// Construct a transmit token.
     fn transmit(&'a mut self) -> Option<Self::TxToken>;
 
@@ -391,10 +402,14 @@ pub trait Device<'a> {
     ) -> InterfaceCall
     {
         match dev_call_state {
-            DeviceCall::Transmit()
+            DeviceCall::Transmit
                 => InterfaceCall::InnerDispatchLocal(self.transmit_no_token()),
-            DeviceCall::Consume(timestamp,packet)
-                => InterfaceCall::MatchSocketDispatchAfter(self.consume_no_token(timestamp, packet))
+            DeviceCall::Consume(timestamp,packet, InterfaceState::Egress)
+                => InterfaceCall::MatchSocketDispatchAfter(self.consume_no_token(timestamp, packet)),
+            DeviceCall::Consume(timestamp,packet, InterfaceState::Ingress)
+                => InterfaceCall::LoopIngress(self.consume_no_token(timestamp, packet)),
+            DeviceCall::Receive(timestamp)
+                => InterfaceCall::ProcessIngress(self.simple_receive(timestamp)),
 
         }
     }
@@ -432,6 +447,7 @@ pub trait TxToken {
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum DeviceCall{
-    Transmit(),
-    Consume(Instant, Vec<u8>)
+    Transmit,
+    Consume(Instant, Vec<u8>, InterfaceState),
+    Receive(Instant),
 }
