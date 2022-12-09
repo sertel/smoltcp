@@ -329,7 +329,7 @@ pub trait Device<'a> {
     /// To simplify things a bit we do not send tokens but merely the info
     fn simple_receive(&'a mut self, timestamp: Instant
     ) -> Option<(Vec<u8>, Result<()>, Option<()>)> {
-        if let Some((rx, tx)) = self.receive() {
+        if let Some((rx, _tx)) = self.receive() {
             let mut received_frame = vec![];
             let receiving_result = rx.consume(timestamp, |frame| { received_frame.extend_from_slice(frame); Ok(())});
             return Some((received_frame, receiving_result, Some(())))

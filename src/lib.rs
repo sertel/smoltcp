@@ -86,7 +86,7 @@ compile_error!("at least one socket needs to be enabled"); */
 #![allow(clippy::identity_op)]
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::unit_arg)]
-
+#[allow(dead_code)]
 #[cfg(any(feature = "std", feature = "alloc"))]
 extern crate alloc;
 extern crate core;
@@ -258,7 +258,7 @@ impl From<wire::Error> for Error {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Either<L, R> {
     Left(L),
     Right(R)

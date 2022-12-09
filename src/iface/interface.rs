@@ -23,7 +23,6 @@ use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
 use crate::{Error, Result, Either};
-use crate::iface::InterfaceCall::InitEgress;
 
 use crate::wire::ip::{Address};
 
@@ -1093,6 +1092,7 @@ impl<'a> Interface<'a> {
                    // give the sockets back and call egress
                     let sockets = self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.take().unwrap();
                     self.sockets.replace(sockets);
+                    net_debug!("Processed any was {}", self.processed_any);
                     return self.process_call::<D>(InterfaceCall::InitEgress);
                 }
             },
@@ -1186,16 +1186,14 @@ impl<'a> Interface<'a> {
                     // remove the EgressState
                     let EgressState{ sockets_during_egress, ..} = self.current_egress_state.take().unwrap();
                     self.sockets = Some(sockets_during_egress.unwrap());
+                    net_debug!("Emitted  any was {}", self.emitted_any);
                     return self.process_call::<D>(InterfaceCall::PollLoopCondition)
                 }
             }
             InterfaceCall::PollLoopCondition => {
-                net_debug!("Emitted  any was {}", self.emitted_any);
-                net_debug!("Processed any was {}", self.processed_any);
                 if self.emitted_any || self.processed_any {
-                    // ToDo: Replace with Ingress once have a loop over both.
                     self.readiness_changed = true;
-                    self.process_call::<D>(InterfaceCall::InitEgress)
+                    self.process_call::<D>(InterfaceCall::InitIngress)
                 } else {
                     net_debug!("Returning readiness changed: {}", self.readiness_changed);
                     let messages = self.unload_sockets();
@@ -1728,6 +1726,7 @@ impl<'a> Interface<'a> {
     where
         D: for<'d> Device<'d>,
     {
+        net_debug!("Socket Ingress");
         let mut processed_any = false;
         let Self {
             inner,
@@ -1783,14 +1782,15 @@ impl<'a> Interface<'a> {
     where
         D: for<'d> Device<'d>,
     {
-        let mut processed_any = false;
+
         let Self {
             inner,
             fragments: ref mut _fragments,
             out_packets: _out_packets,
             ..
         } = self;
-
+        net_debug!("Socket Ingress");
+        let mut processed_any = false;
         while let Some((rx_token, tx_token)) = device.receive() {
             let buffer = Rc::new(RefCell::new(vec![]));
             let other_handle = buffer.clone();
@@ -1861,7 +1861,7 @@ impl<'a> Interface<'a> {
         sockets: &mut SocketSet<'_>,
         received_frame:Vec<u8>,
         receiving_result: Result<()>,
-        tx_emulated_token : Option<()>,
+        _tx_emulated_token : Option<()>,
     ) -> Option<Vec<u8>>
     {
         let Self {
@@ -5706,18 +5706,67 @@ mod test {
 
         let timestamp = Instant::now();
         let msg = "hello".as_bytes().to_vec();
+        let msg_ip_repr = [255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 8, 0, 69, 0, 0, 45, 0, 0, 64, 0, 64, 6, 121, 34, 192, 168, 1, 1, 255, 255, 255, 255, 0, 80, 193, 92, 0, 0, 39, 17, 255, 255, 216, 240, 80, 24, 0, 64, 232, 93, 0, 0, 104, 101, 108, 108, 111];
 
         let messages = vec![(tcp_socket_handle, msg.clone())];
         let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
         assert!(Either::is_left(&dev_transmit_call));
         let call = dev_transmit_call.left_or_panic();
-        assert_eq!(call, DeviceCall::Transmit);
+        assert_eq!(call, DeviceCall::Receive(timestamp));
         let iface_call = device.process_call(call);
-        assert_eq!(iface_call, InterfaceCall::InnerDispatchLocal(Some(())));
-        let dev_send_call = iface.process_call::<Loopback>(iface_call);
-        assert!(Either::is_left(&dev_send_call));
-        let dev_call = dev_send_call.left_or_panic();
+        // Nothing send so far, so we expect no ingress
+        assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
+        let dev_call_transmit = iface.process_call::<Loopback>(iface_call);
+        // We expect ingress to end, with nothing processed, and egress
+        // to start and send a call to the device to request a token
+        assert_eq!(iface.processed_any, false);
+        assert!(Either::is_left(&dev_call_transmit));
+        let dev_call = dev_call_transmit.left_or_panic();
+        assert_eq!(dev_call, DeviceCall::Transmit);
+        // Next we expect to get a token, and call dispatch on the interface
+        // This should succeed and give us a call to consume/send the packet
+        let iface_call_dispatch = device.process_call(dev_call);
+        assert_eq!(iface_call_dispatch, InterfaceCall::InnerDispatchLocal(Some(())));
+        let dev_call_send_either = iface.process_call::<Loopback>(iface_call_dispatch);
+        assert!(Either::is_left(&dev_call_send_either));
+        let dev_call_send = dev_call_send_either.left_or_panic();
+        assert_eq!(dev_call_send, DeviceCall::Consume(timestamp, msg_ip_repr.to_vec(), InterfaceState::Egress));
+        let iface_call_match_after = device.process_call(dev_call_send);
+        assert_eq!(iface_call_match_after, InterfaceCall::MatchSocketDispatchAfter(Ok(())));
+        let next_round_dev_call = iface.process_call::<Loopback>(iface_call_match_after);
+        // As egress was succesfull we expect `readiness_changes` to be true
+        // and another poll loop to start with ingress
+        assert_eq!(iface.readiness_changed, true);
+        assert!(Either::is_left(&next_round_dev_call));
+        let dev_receive_call = next_round_dev_call.left_or_panic();
+        assert_eq!(dev_receive_call, DeviceCall::Receive(timestamp));
+        let iface_call = device.process_call(dev_receive_call);
+        // We've send something and as we're on a loopback we expect to
+        // get it back
+        assert_eq!(iface_call, InterfaceCall::ProcessIngress(Some((msg_ip_repr.to_vec(), Ok(()), Some(())))));
+        // sending a response will fail, so the interface tries to receive again
+        let dev_receive_call2 = iface.process_call::<Loopback>(iface_call).left_or_panic();
+        assert_eq!(dev_receive_call2, DeviceCall::Receive(timestamp));
+        // again we'll get a ProcessIngress call, that will find no new packet
+        let iface_call = device.process_call(dev_receive_call2);
+        assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
+        // Now the interface will loop a bit
+        // first it switches to egress again
+        // second as there is no new packet, but there was some in the last round
+        //  it will enter the poll loop once again with ingress
+        // third it outputs a new receive request to the device
+        let device_call = iface.process_call::<Loopback>(iface_call).left_or_panic();
+        assert_eq!(device_call, DeviceCall::Receive(timestamp));
+        // again we'll get a ProcessIngress call, that will find no new packet
+        let iface_call = device.process_call(device_call);
+        assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
+        // and now the interface will loop on to the end of poll as nothing changed
+        let final_output = iface.process_call::<Loopback>(iface_call);
+        assert!(Either::is_right(&final_output));
+        assert_eq!(final_output.right_or_panic(), (true, vec![]));
+        /*
         let iface_call_post_process = device.process_call(dev_call);
+
         assert_eq!(iface_call_post_process, InterfaceCall::MatchSocketDispatchAfter(Ok(())));
         let poll_result_and_messages = iface.process_call::<Loopback>(iface_call_post_process);
         assert!(Either::is_right(&poll_result_and_messages));
@@ -5727,7 +5776,7 @@ mod test {
         assert_eq!(messages, vec![]);
         // Also, because of lacking ingress, the device should have one packet now
         assert_eq!(device.num_tx_packets(), 1);
-        assert_eq!(iface.emitted_any, false);
+        assert_eq!(iface.emitted_any, false);*/
 
         /*
         // Again make sure the data arrived at the device level:
@@ -5740,7 +5789,7 @@ mod test {
        let s2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle).state();
        assert_eq!(s1, s2);*/
     }
-
+/*
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_normal_no_packet() {
@@ -6003,5 +6052,5 @@ mod test {
         let (poll_result, messages) = dev_call_or_result.right_or_panic();
         assert_eq!(poll_result, false);
         assert_eq!(messages, vec![]);
-    }
+    }*/
 }
