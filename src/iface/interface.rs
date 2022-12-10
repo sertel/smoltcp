@@ -891,7 +891,7 @@ impl<'a> Interface<'a> {
     pub fn load_sockets(&mut self, messages: Messages) {
         let sockets = self.sockets.as_mut().unwrap();
         for (handle, message) in messages.iter() {
-            let current_socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(*handle);
+            let current_socket = sockets.get_mut::<tcp::Socket>(*handle);
             if !current_socket.is_open() {
                 current_socket.listen(6969).unwrap();
             }
@@ -916,7 +916,7 @@ impl<'a> Interface<'a> {
         let sockets = self.sockets.as_mut().unwrap();
         for index in 0..sockets.size() {
             let handle = SocketHandle::from_index(index);
-            let current_socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(handle);
+            let current_socket = sockets.get_mut::<tcp::Socket>(handle);
             if !current_socket.is_open() {
                 current_socket.listen(6969).unwrap();
             }
@@ -948,10 +948,10 @@ impl<'a> Interface<'a> {
         let sockets_as_in_original_code = sockets_during_egress.as_mut().unwrap();
         let item = sockets_as_in_original_code.get_mut_item(handle.unwrap()).unwrap();
         let result = match &mut item.socket{
-            Socket::OhuaTcp(socket) => {
+            Socket::Tcp(socket) => {
                socket.dispatch_after(self.context(), current_response.unwrap())
             },
-            _ => panic!("Only Ohua TCP sockets supported!"),
+            _ => panic!("Only TCP sockets supported!"),
         };
         self.current_egress_state.replace(
             EgressState{
@@ -1210,7 +1210,7 @@ impl<'a> Interface<'a> {
                     // would add another loop betweein components so I'll keep it simpler
                     // for now.
                     let handle = SocketHandle::from_index(0);
-                    let socket = self.get_mut::<tcp_ohua::OhuaTcpSocket>(handle);
+                    let socket = self.get_mut::<tcp::Socket>(handle);
                     if !socket.is_open() {
                         socket.listen(6969).unwrap();
                     }
@@ -1234,7 +1234,7 @@ impl<'a> Interface<'a> {
             },
             InterfaceCall::AnswerToSocket(mut anwers) => {
                 let (handle, answer) = anwers.pop().unwrap();
-                let socket = self.get_mut::<tcp_ohua::OhuaTcpSocket>(handle);
+                let socket = self.get_mut::<tcp::Socket>(handle);
                 socket.send_slice(&answer);
                 // todo: Again I ignore phy_wait here
                 return self.process_call::<D>(InterfaceCall::InitPoll)
@@ -1274,8 +1274,8 @@ impl<'a> Interface<'a> {
             let item= sockets.get_mut_item(next_handle).unwrap();
             if item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
                 let packet_or_ok = match &mut item.socket {
-                    Socket::OhuaTcp(socket) => socket.dispatch_before(inner),
-                    _ => panic!("Only Ohua TCP sockets supported!"),
+                    Socket::Tcp(socket) => socket.dispatch_before(inner),
+                    _ => panic!("Only TCP sockets supported!"),
                 };
                 if is_packet(&packet_or_ok) {
                     let (response_tpl, response_and_keepalive) = packet_or_ok.left_or_panic();
@@ -2055,12 +2055,7 @@ impl<'a> Interface<'a> {
                 #[cfg(feature = "socket-dns")]
                 Socket::Dns(ref mut socket) => socket.dispatch(inner, |inner, response| {
                     respond(inner, IpPacket::Udp(response))
-                }),
-                #[cfg(feature = "ohua")]
-                Socket::OhuaTcp(ref mut socket) => socket.dispatch(inner, |inner, response| {
-                    respond(inner, IpPacket::Tcp(response))
-                }),
-                _ => panic!("Don't mix normal interface with Ohua raw sockets")
+                })
             };
             temp_canarie = result.clone();
             match result {
@@ -3582,18 +3577,6 @@ impl<'a> InterfaceInner<'a> {
             }
         }
 
-        // ToDo: Merge loops
-        for tcp_socket in sockets
-            .items_mut()
-            .filter_map(|i| tcp_ohua::OhuaTcpSocket::downcast_mut(&mut i.socket))
-        {
-            if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
-                return tcp_socket
-                    .process(self, &ip_repr, &tcp_repr)
-                    .map(IpPacket::Tcp);
-            }
-        }
-
         if tcp_repr.control == TcpControl::Rst {
             // Never reply to a TCP RST packet with another TCP RST packet.
             None
@@ -4339,10 +4322,10 @@ mod test {
     use crate::phy::{ChecksumCapabilities, Loopback, BrokenLoopback};
     #[cfg(feature = "proto-igmp")]
     use crate::{Error, Result};
-    use crate::socket::tcp_ohua::test::{
-        OhuaTestSocket,
-        ohua_socket_established_with_endpoints,
-        ohua_socket_closing_with_endpoints};
+    use crate::socket::tcp::test::{
+        TestSocket,
+        socket_established_with_endpoints,
+        socket_closing_with_endpoints};
     use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
 
     #[allow(unused)]
@@ -5745,7 +5728,7 @@ mod test {
         // OHUA: Version
         net_debug!("\n Ohua State driven poll");
         let (mut iface, _sockets, mut device) = create();
-        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -5761,7 +5744,7 @@ mod test {
 
         let tcp_socket_handle = iface.add_socket(socket);
 
-        let socket = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let socket = iface.get_mut::<tcp::Socket>(tcp_socket_handle);
 
         // Sockets sending buffer should be empty before sending
         assert!(!socket.can_recv());
@@ -5851,7 +5834,7 @@ mod test {
 
        // compare the states of both sockets
        let s1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1).state();
-       let s2 = sockets2.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle).state();
+       let s2 = sockets2.get_mut::<tcp::Socket>(tcp_socket_handle).state();
        assert_eq!(s1, s2);*/
     }
 /*
@@ -5901,7 +5884,7 @@ mod test {
         // OHUA: Version; This time with no packet, polling should return false
         net_debug!("\n Ohua State driven poll - No packet");
         let (mut iface, _sockets, device) = create();
-        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -5917,7 +5900,7 @@ mod test {
 
         let tcp_socket_handle = iface.add_socket(socket);
 
-        let socket2 = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let socket2 = iface.get_mut::<tcp::Socket>(tcp_socket_handle);
 
         // Sockets sending buffer should be empty before sending
         assert!(!socket2.can_recv());
@@ -5947,7 +5930,7 @@ mod test {
         net_debug!("\n Normal poll - Closing Socket");
         let (mut iface1, mut sockets1, mut device1) = create();
 
-        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_closing_with_endpoints(
+        let TestSocket { socket, cx: _cx } = socket_closing_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -5963,7 +5946,7 @@ mod test {
 
         let tcp_socket_handle1 = sockets1.add(socket);
 
-        let socket1 = sockets1.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle1);
+        let socket1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1);
         assert!(!socket1.can_recv());
         assert!(!socket1.may_send());
         assert!(!socket1.can_send());
@@ -5990,7 +5973,7 @@ mod test {
         // OHUA: Version; This time with closing socket -> no polling activity
         net_debug!("\n Ohua State driven poll - Closing Socket");
         let (mut iface, _sockets, mut device) = create();
-        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_closing_with_endpoints(
+        let TestSocket { socket, cx: _cx } = socket_closing_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -6005,7 +5988,7 @@ mod test {
 
         let tcp_socket_handle = iface.add_socket(socket);
 
-        let socket = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let socket = iface.get_mut::<tcp::Socket>(tcp_socket_handle);
         // Sockets sending buffer should be empty before sending
         assert!(!socket.can_recv());
         assert!(!socket.may_send());
@@ -6047,7 +6030,7 @@ mod test {
         //This time without packets -> polling should return Ok(false)
         let (mut iface, mut sockets, mut device) = create_ethernet_exhausted_device();
         assert!(device.transmit().is_none());
-        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -6060,7 +6043,7 @@ mod test {
         let tcp_socket_handle = sockets.add(socket);
         // we add a socket, prepare a message but nothing should happen
         // because the device is exhausted
-        let socket = sockets.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let socket = sockets.get_mut::<tcp::Socket>(tcp_socket_handle);
         let msg = "hello".as_bytes();
         let msg_len = msg.len();
         let result_len = socket.send_slice(msg);
@@ -6079,7 +6062,7 @@ mod test {
         //This time without packets -> polling should return Ok(false)
         let (mut iface, _sockets, mut device) = create_ethernet_exhausted_device();
         assert!(device.transmit().is_none());
-        let OhuaTestSocket { socket, cx: _cx } = ohua_socket_established_with_endpoints(
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
                 port: 80
@@ -6094,7 +6077,7 @@ mod test {
 
         let tcp_socket_handle = iface.add_socket(socket);
 
-        let socket = iface.get_mut::<tcp_ohua::OhuaTcpSocket>(tcp_socket_handle);
+        let socket = iface.get_mut::<tcp::Socket>(tcp_socket_handle);
 
         // Sockets sending buffer should be empty before sending
         assert!(!socket.can_recv());

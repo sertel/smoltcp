@@ -326,24 +326,13 @@ pub trait Device<'a> {
     /// need to be sent back, without heap allocation.
     fn receive(&'a mut self) -> Option<(Self::RxToken, Self::TxToken)>;
 
-    /// To simplify things a bit we do not send tokens but merely the info
-    fn simple_receive(&'a mut self, timestamp: Instant
-    ) -> Option<(Vec<u8>, Result<()>, Option<()>)> {
-        if let Some((rx, _tx)) = self.receive() {
-            let mut received_frame = vec![];
-            let receiving_result = rx.consume(timestamp, |frame| { received_frame.extend_from_slice(frame); Ok(())});
-            return Some((received_frame, receiving_result, Some(())))
-        } else {
-            None
-        }
-    }
     /// Construct a transmit token.
     fn transmit(&'a mut self) -> Option<Self::TxToken>;
 
     /// Get a description of device capabilities.
     fn capabilities(&self) -> DeviceCapabilities;
 
-    fn send(&'a mut self, timestamp:Instant, packet:Vec<u8>) -> Result<()> {
+    fn send_tokenfree(&'a mut self, timestamp:Instant, packet:Vec<u8>) -> Result<()> {
         let sending_result
             = self.transmit().ok_or_else(|| {
                         net_debug!("failed to transmit IP: {}", Error::Exhausted);
@@ -354,43 +343,25 @@ pub trait Device<'a> {
         sending_result
     }
 
-    fn transmit_no_token(&'a mut self) -> Option<()> {
+        /// To simplify things a bit we do not send tokens but merely the info
+    fn receive_tokenfree(&'a mut self, timestamp: Instant
+    ) -> Option<(Vec<u8>, Result<()>, Option<()>)> {
+        if let Some((rx, _tx)) = self.receive() {
+            let mut received_frame = vec![];
+            let receiving_result = rx.consume(timestamp, |frame| { received_frame.extend_from_slice(frame); Ok(())});
+            return Some((received_frame, receiving_result, Some(())))
+        } else {
+            None
+        }
+    }
+
+    fn transmit_tokenfree(&'a mut self) -> Option<()> {
         if self.transmit().is_some() {
             Some(())
         } else {
             None
         }
 
-    }
-
-    fn consume_token(
-        &'a mut self,
-        timestamp:Instant,
-        packet:Vec<u8>,
-        token:Option<<Self as Device<'a>>::TxToken>) -> Result<()>
-    where <Self as Device<'a>>::TxToken: Debug
-    {
-        token.ok_or(
-            Err::<<Self as Device<'a>>::TxToken, Error>(Error::Exhausted)).unwrap().consume(timestamp, packet.len(),
-                  |buffer| {
-                      buffer.copy_from_slice(packet.as_slice());
-                      Ok(())
-                  })
-    }
-
-    fn consume_no_token(
-    &'a mut self,
-    timestamp:Instant,
-    packet:Vec<u8>) -> Result<()>
-    {
-        let token = self
-            .transmit()
-            .ok_or(Error::Exhausted)?;
-        token.consume(timestamp, packet.len(),
-              |buffer| {
-                  buffer.copy_from_slice(packet.as_slice());
-                  Ok(())
-              })
     }
 
     // ToDo: To keep it simple we currently just send around a simple Ok
@@ -403,13 +374,13 @@ pub trait Device<'a> {
     {
         match dev_call_state {
             DeviceCall::Transmit
-                => InterfaceCall::InnerDispatchLocal(self.transmit_no_token()),
+                => InterfaceCall::InnerDispatchLocal(self.transmit_tokenfree()),
             DeviceCall::Consume(timestamp,packet, InterfaceState::Egress)
-                => InterfaceCall::MatchSocketDispatchAfter(self.consume_no_token(timestamp, packet)),
+                => InterfaceCall::MatchSocketDispatchAfter(self.send_tokenfree(timestamp, packet)),
             DeviceCall::Consume(timestamp,packet, InterfaceState::Ingress)
-                => InterfaceCall::LoopIngress(self.consume_no_token(timestamp, packet)),
+                => InterfaceCall::LoopIngress(self.send_tokenfree(timestamp, packet)),
             DeviceCall::Receive(timestamp)
-                => InterfaceCall::ProcessIngress(self.simple_receive(timestamp)),
+                => InterfaceCall::ProcessIngress(self.receive_tokenfree(timestamp)),
 
         }
     }

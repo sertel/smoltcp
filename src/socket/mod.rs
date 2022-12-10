@@ -27,15 +27,14 @@ pub mod tcp;
 #[cfg(feature = "socket-udp")]
 pub mod udp;
 
+/*
 #[cfg(feature = "ohua")]
 pub mod tcp_ohua;
 pub mod raw_ohua;
+*/
 
 #[cfg(feature = "async")]
 mod waker;
-
-#[cfg(feature="ohua")]
-pub use self::tcp_ohua::{DispatchCall, DispatchResult};
 
 
 #[cfg(feature = "async")]
@@ -77,10 +76,6 @@ pub enum Socket<'a> {
     Dhcpv4(dhcpv4::Socket<'a>),
     #[cfg(feature = "socket-dns")]
     Dns(dns::Socket<'a>),
-    #[cfg(feature = "ohua")]
-    OhuaTcp(tcp_ohua::OhuaTcpSocket<'a>),
-    #[cfg(feature = "ohua")]
-    OhuaRaw(raw_ohua::ORawSocket<'a>),
 }
 
 impl<'a> Socket<'a> {
@@ -94,10 +89,6 @@ impl<'a> Socket<'a> {
             Socket::Udp(s) => s.poll_at(cx),
             #[cfg(feature = "socket-tcp")]
             Socket::Tcp(s) => s.poll_at(cx),
-            #[cfg(feature = "ohua")]
-            Socket::OhuaTcp(s) => s.poll_at(cx),
-            #[cfg(feature = "ohua")]
-            Socket::OhuaRaw(s) =>  s.poll_at(cx),
             #[cfg(feature = "socket-dhcpv4")]
             Socket::Dhcpv4(s) => s.poll_at(cx),
             #[cfg(feature = "socket-dns")]
@@ -160,8 +151,6 @@ from_socket!(icmp::Socket<'a>, Icmp);
 from_socket!(udp::Socket<'a>, Udp);
 #[cfg(feature = "socket-tcp")]
 from_socket!(tcp::Socket<'a>, Tcp);
-#[cfg(feature = "ohua")]
-from_socket!(tcp_ohua::OhuaTcpSocket<'a>, OhuaTcp);
 #[cfg(feature = "socket-dhcpv4")]
 from_socket!(dhcpv4::Socket<'a>, Dhcpv4);
 #[cfg(feature = "socket-dns")]
