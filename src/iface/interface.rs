@@ -3582,6 +3582,18 @@ impl<'a> InterfaceInner<'a> {
             }
         }
 
+        // ToDo: Merge loops
+        for tcp_socket in sockets
+            .items_mut()
+            .filter_map(|i| tcp_ohua::OhuaTcpSocket::downcast_mut(&mut i.socket))
+        {
+            if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
+                return tcp_socket
+                    .process(self, &ip_repr, &tcp_repr)
+                    .map(IpPacket::Tcp);
+            }
+        }
+
         if tcp_repr.control == TcpControl::Rst {
             // Never reply to a TCP RST packet with another TCP RST packet.
             None
