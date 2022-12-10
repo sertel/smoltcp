@@ -32,17 +32,17 @@ fn main() {
     let (mut app, mut messages):(App, Messages) = init_app_and_sockets(handels);
     //loop_as_rec(app, ip_stack, device, messages, fd)
     let mut timestamp = Instant::now();
-    let mut iface_call = InterfaceCall::InitPoll(messages, timestamp);
+    let mut iface_call = InterfaceCall::InitPoll;
     loop {
-        let device_call_or_return = ip_stack.process_call::<TunTapInterface>(iface_call);
-        if Either::is_left(&device_call_or_return){
-            iface_call = device.process_call(device_call_or_return.left_or_panic())
+        let device_or_app_call = ip_stack.process_call::<TunTapInterface>(iface_call);
+        if Either::is_left(&device_or_app_call){
+            iface_call = device.process_call(device_or_app_call.left_or_panic())
         } else {
-            let (readiness_has_changed, messages_new) = device_call_or_return.right_or_panic();
-            messages = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
-            phy_wait(fd, ip_stack.poll_delay(timestamp)).expect("wait error");
+            let (readiness_has_changed, messages_new) = device_or_app_call.right_or_panic();
+            let answers = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
+            phy_wait(fd, ip_stack.poll_delay_ohua(timestamp)).expect("wait error");
             timestamp = Instant::now();
-            iface_call = InterfaceCall::InitPoll(messages, timestamp);
+            iface_call = InterfaceCall::AnswerToSocket(answers);
         }
     }
 }
@@ -102,11 +102,11 @@ fn loop_as_rec(
     let timestamp = Instant::now();
     let (poll_res, mut ip_stack_poll, device_poll, messages_poll):
         (Result<bool>, Interface, TunTapInterface, Messages) =
-        poll_recursion_on_call(ip_stack, InterfaceCall::InitPoll(messages, timestamp), device);
+        poll_recursion_on_call(ip_stack, InterfaceCall::InitPoll, device);
 
     let messages_do_app_stuff: Messages = app.do_app_stuff(poll_res, messages_poll);
         
-    phy_wait(fd, ip_stack_poll.poll_delay(timestamp)).expect("wait error");
+    phy_wait(fd, ip_stack_poll.poll_delay_ohua(timestamp)).expect("wait error");
 
 
     if should_continue() {
@@ -131,3 +131,13 @@ fn poll_recursion_on_call<'a, D>(
             (Ok(readiness_has_changed), ip_stack, device, messages_new)
         }
     }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_app() {
+        main()
+    }
+
+}

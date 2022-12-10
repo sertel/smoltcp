@@ -67,7 +67,7 @@ pub type Messages = Vec<(SocketHandle, Vec<u8>)>;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum InterfaceCall{
-    InitPoll(Messages, Instant),
+    InitPoll,
     InitIngress,
     // ToDo: This represents the received data, the receive result and the tx token but probably there is a nicer way to do this.
     ProcessIngress(Option<(Vec<u8>, Result<()>, Option<()>)>),
@@ -82,7 +82,8 @@ pub enum InterfaceCall{
     // takes the emit result of the current socket
     HandleResult(Result<()>),
     // iterates to nex socket & packet
-    UpdateEgressState
+    UpdateEgressState,
+    AnswerToSocket(Vec<(SocketHandle, Vec<u8>)>),
 }
 
 // Calls to device overlap for Ingress and
@@ -876,7 +877,14 @@ impl<'a> Interface<'a> {
 
     /// Only for testing purpose
     fn get_mut<T: AnySocket<'a>>(&mut self, handle: SocketHandle) -> &mut T {
-        self.sockets.as_mut().unwrap().get_mut(handle)
+        if self.sockets.is_some(){
+            self.sockets.as_mut().unwrap().get_mut(handle)
+        } else if self.current_egress_state.is_some() {
+            self.current_egress_state.as_mut().unwrap().sockets_during_egress.as_mut().unwrap().get_mut(handle)
+        } else {
+            self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.as_mut().unwrap().get_mut(handle)
+        }
+
     }
     //Starting here functions are wrappers
     // created during 'transormation''
@@ -900,7 +908,11 @@ impl<'a> Interface<'a> {
 
     pub fn unload_sockets(&mut self) -> Messages
     {
+        // As we iterate over the messages when loading the sockets,
+        // we need to keep all handles in the vector so that every
+        // socket will be used again.
         let mut messages = vec![];
+        let mut current_msg = vec![];
         let sockets = self.sockets.as_mut().unwrap();
         for index in 0..sockets.size() {
             let handle = SocketHandle::from_index(index);
@@ -911,12 +923,13 @@ impl<'a> Interface<'a> {
             if current_socket.may_recv() {
                 let input = current_socket.recv(process_octets).unwrap();
                 if current_socket.can_send() && !input.is_empty() {
-                    messages.push((handle, input))
+                    current_msg = input;
                 }
             } else if current_socket.may_send() {
                     net_debug!("tcp:6969 close");
                     current_socket.close();
             }
+            messages.push((handle, current_msg.clone()));
         }
         messages
     }
@@ -1025,20 +1038,16 @@ impl<'a> Interface<'a> {
         match call {
             // This is essentially the entry point for the
             // communication with the app
-            InterfaceCall::InitPoll(messages, timestamp) => {
+            InterfaceCall::InitPoll => {
                 // This replaces the inface.poll call
                 // So we have to set the state thats 'permanent during one
                 // poll call'
                 // 1. set the timestamp
-                self.inner.now = timestamp;
+                self.inner.now = Instant::now();
                 // 2. Set 'processing indicators'
                 self.emitted_any = false;
                 self.processed_any = false;
                 self.readiness_changed = false;
-                // 3. "Load" the sockets with incomming messages from the
-                //    app
-                self.load_sockets(messages);
-
                 // now the original code would loop ingress and egress
                 /*
                 loop {
@@ -1195,11 +1204,42 @@ impl<'a> Interface<'a> {
                     self.readiness_changed = true;
                     self.process_call::<D>(InterfaceCall::InitIngress)
                 } else {
-                    net_debug!("Returning readiness changed: {}", self.readiness_changed);
-                    let messages = self.unload_sockets();
-                    return Either::Right((self.readiness_changed,messages))
+                    net_debug!("We're done with polling. Rediness changed?: {}", self.readiness_changed);
+                    // Now we do the socket-app-communication part
+                    // Normally we'd have a loop over the sockets here, but that
+                    // would add another loop betweein components so I'll keep it simpler
+                    // for now.
+                    let handle = SocketHandle::from_index(0);
+                    let socket = self.get_mut::<tcp_ohua::OhuaTcpSocket>(handle);
+                    if !socket.is_open() {
+                        socket.listen(6969).unwrap();
+                    }
+
+                    if socket.may_recv() {
+                        let input = socket.recv(process_octets).unwrap();
+                        if socket.can_send() && !input.is_empty() {
+                            net_debug!(
+                                "tcp:6969 send data: {:?}",
+                                std::str::from_utf8(input.as_ref()).unwrap_or("(invalid utf8)")
+                            );
+                            return Either::Right((self.processed_any, vec![(handle, input)]));
+                        }
+                    } else if socket.may_send() {
+                        net_debug!("tcp:6969 close");
+                        socket.close();
+                    }
+                    // toDo: I pretend for a moment that I don't have to phy_wait
+                    return self.process_call::<D>(InterfaceCall::InitPoll)
                 }
+            },
+            InterfaceCall::AnswerToSocket(mut anwers) => {
+                let (handle, answer) = anwers.pop().unwrap();
+                let socket = self.get_mut::<tcp_ohua::OhuaTcpSocket>(handle);
+                socket.send_slice(&answer);
+                // todo: Again I ignore phy_wait here
+                return self.process_call::<D>(InterfaceCall::InitPoll)
             }
+
 
         }
     }
@@ -1711,15 +1751,23 @@ impl<'a> Interface<'a> {
     ///
     /// [poll]: #method.poll
     /// [Duration]: struct.Duration.html
-    pub fn poll_delay(&mut self, timestamp: Instant) -> Option<Duration> {
-        let sockets = self.sockets.take().unwrap();
-        let duration = match self.poll_at(timestamp, & sockets) {
+    pub fn poll_delay(&mut self, timestamp: Instant, sockets: &SocketSet<'_>) -> Option<Duration> {
+        match self.poll_at(timestamp, sockets) {
             Some(poll_at) if timestamp < poll_at => Some(poll_at - timestamp),
             Some(_) => Some(Duration::from_millis(0)),
             _ => None,
-        };
-        self.sockets.replace(sockets);
-        duration
+        }
+    }
+
+    pub fn poll_delay_ohua(&mut self, timestamp: Instant) -> Option<Duration> {
+    let sockets = self.sockets.take().unwrap();
+    let duration = match self.poll_at(timestamp, & sockets) {
+        Some(poll_at) if timestamp < poll_at => Some(poll_at - timestamp),
+        Some(_) => Some(Duration::from_millis(0)),
+        _ => None,
+    };
+    self.sockets.replace(sockets);
+    duration
     }
 
     fn socket_ingress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
@@ -5672,6 +5720,11 @@ mod test {
             timestamp, &mut device1, &mut sockets1);
         assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
         assert_eq!(0, device1.num_tx_packets());
+
+        let socket1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1);
+        net_debug!("Socket in state: {:?}", socket1.state());
+        net_debug!("Sockets sending queue: {:?}", socket1.send_queue());
+        net_debug!("Sockets received queue: {:?}", socket1.recv_queue());
     }
 
     #[test]
@@ -5709,10 +5762,10 @@ mod test {
         let msg_ip_repr = [255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 8, 0, 69, 0, 0, 45, 0, 0, 64, 0, 64, 6, 121, 34, 192, 168, 1, 1, 255, 255, 255, 255, 0, 80, 193, 92, 0, 0, 39, 17, 255, 255, 216, 240, 80, 24, 0, 64, 232, 93, 0, 0, 104, 101, 108, 108, 111];
 
         let messages = vec![(tcp_socket_handle, msg.clone())];
-        let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll(messages, timestamp));
+        let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll);
         assert!(Either::is_left(&dev_transmit_call));
         let call = dev_transmit_call.left_or_panic();
-        assert_eq!(call, DeviceCall::Receive(timestamp));
+        assert_eq!(call, DeviceCall::Receive(iface.inner.now));
         let iface_call = device.process_call(call);
         // Nothing send so far, so we expect no ingress
         assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
@@ -5739,7 +5792,7 @@ mod test {
         assert_eq!(iface.readiness_changed, true);
         assert!(Either::is_left(&next_round_dev_call));
         let dev_receive_call = next_round_dev_call.left_or_panic();
-        assert_eq!(dev_receive_call, DeviceCall::Receive(timestamp));
+        assert_eq!(dev_receive_call, DeviceCall::Receive(iface.inner.now));
         let iface_call = device.process_call(dev_receive_call);
         // We've send something and as we're on a loopback we expect to
         // get it back
@@ -5756,14 +5809,14 @@ mod test {
         //  it will enter the poll loop once again with ingress
         // third it outputs a new receive request to the device
         let device_call = iface.process_call::<Loopback>(iface_call).left_or_panic();
-        assert_eq!(device_call, DeviceCall::Receive(timestamp));
+        assert_eq!(device_call, DeviceCall::Receive(iface.inner.now));
         // again we'll get a ProcessIngress call, that will find no new packet
         let iface_call = device.process_call(device_call);
         assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
         // and now the interface will loop on to the end of poll as nothing changed
         let final_output = iface.process_call::<Loopback>(iface_call);
         assert!(Either::is_right(&final_output));
-        assert_eq!(final_output.right_or_panic(), (true, vec![]));
+        assert_eq!(final_output.right_or_panic(), (true, vec![(SocketHandle::from_index(0), vec![])]));
         /*
         let iface_call_post_process = device.process_call(dev_call);
 
