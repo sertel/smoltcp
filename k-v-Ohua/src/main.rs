@@ -10,6 +10,8 @@ use std::{thread};
 use std::time::Duration;
 use crate::ohua_util::init_components::App;
 
+fn should_continue()-> bool {true}
+
 fn maybe_wait(call: InterfaceCall) -> InterfaceCall {
     match call {
         InterfaceCall::ProcessWait(duration, dev_sgn) =>
@@ -44,6 +46,8 @@ fn main() {
     let mut app: App = init_app(handels);
     let mut iface_call = InterfaceCall::InitPoll;
 
+    loop_as_rec_limited(app, ip_stack, device, iface_call, 0)
+    /*
     loop {
         let device_or_app_call = ip_stack.process_call::<TunTapInterface>(iface_call);
         if Either::is_left(&device_or_app_call){
@@ -54,9 +58,36 @@ fn main() {
             let answers = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
             iface_call = InterfaceCall::AnswerToSocket(answers);
         }
-    }
+    }*/
 }
 
+
+fn loop_as_rec_limited(
+    mut app: App,
+    mut ip_stack: Interface,
+    mut device: TunTapInterface,
+    mut if_call: InterfaceCall,
+    count: i32) -> () {
+    // Without tailcall elimination, we can only test this recursive
+    // Version via limiting it to few recursions, otherwise we get an
+    // instant stack overflow
+    if count > 10 {return}
+    let device_or_app_call = ip_stack.process_call::<TunTapInterface>(if_call);
+    let if_call_new =
+            if Either::is_left(&device_or_app_call){
+                let call = device.process_call(device_or_app_call.left_or_panic());
+                maybe_wait(call)
+            } else {
+                let (readiness_has_changed, messages_new) = device_or_app_call.right_or_panic();
+                let answers = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
+                InterfaceCall::AnswerToSocket(answers)
+            };
+    if should_continue() {
+        loop_as_rec_limited(app, ip_stack, device, if_call_new, count+1)
+    } else {
+        ()
+    }
+}
 
 
 /* Target:
@@ -77,6 +108,4 @@ fn loop_as_rec(app, ip_stack, device, sockets, call) {
         ()
      }
 }
-
-
 */
