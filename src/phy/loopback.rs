@@ -57,6 +57,7 @@ impl<'a> Device<'a> for Loopback {
         })
     }
 
+    fn needs_poll(&self) -> bool {true}
 }
 
 #[doc(hidden)]
@@ -149,6 +150,10 @@ impl<'a> Device<'a> for BrokenLoopback {
             medium: self.medium,
             ..DeviceCapabilities::default()
         }
+    }
+    ///Dummy function to resemble m3 device interface
+    fn needs_poll(&self) -> bool {
+        true
     }
 
 }

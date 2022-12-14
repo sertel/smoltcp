@@ -109,9 +109,6 @@ fn main() {
             debug!("tcp:6969 close");
             socket.close();
         }
-
-        // ToDo: waiting is messed up because we now take the internal sockets
-        //  of the interface which are just [] in this case
-        phy_wait(fd, iface.poll_delay(timestamp)).expect("wait error");
+        phy_wait(fd, iface.poll_delay(timestamp, &sockets)).expect("wait error");
     }
 }

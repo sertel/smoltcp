@@ -84,6 +84,7 @@ pub enum InterfaceCall{
     // iterates to nex socket & packet
     UpdateEgressState,
     AnswerToSocket(Vec<(SocketHandle, Vec<u8>)>),
+    ProcessWait(Option<Duration>, bool),
 }
 
 // Calls to device overlap for Ingress and
@@ -1202,7 +1203,7 @@ impl<'a> Interface<'a> {
             InterfaceCall::PollLoopCondition => {
                 if self.emitted_any || self.processed_any {
                     self.readiness_changed = true;
-                    self.process_call::<D>(InterfaceCall::InitIngress)
+                    return self.process_call::<D>(InterfaceCall::InitIngress)
                 } else {
                     net_debug!("We're done with polling. Rediness changed?: {}", self.readiness_changed);
                     // Now we do the socket-app-communication part
@@ -1228,19 +1229,28 @@ impl<'a> Interface<'a> {
                         net_debug!("tcp:6969 close");
                         socket.close();
                     }
-                    // toDo: I pretend for a moment that I don't have to phy_wait
-                    return self.process_call::<D>(InterfaceCall::InitPoll)
+                    let iface_wait_proposal = self.poll_delay_ohua(self.inner.now);
+                    return Either::Left(DeviceCall::NeedsPoll(iface_wait_proposal))
                 }
             },
             InterfaceCall::AnswerToSocket(mut anwers) => {
-                let (handle, answer) = anwers.pop().unwrap();
-                let socket = self.get_mut::<tcp::Socket>(handle);
-                socket.send_slice(&answer);
-                // todo: Again I ignore phy_wait here
-                return self.process_call::<D>(InterfaceCall::InitPoll)
+                // actually we're sure at this point that there is an answer
+                if let Some((handle, answer)) = anwers.pop(){
+                    let socket = self.get_mut::<tcp::Socket>(handle);
+                    socket.send_slice(&answer);
+                }
+                // before we poll again we need to wait, we need to do it
+                // in the main scope and we need to aske the device for it's
+                // 'opinion' -> We send our 'proposed waiting time' to the device
+                // let the device answer sending it's opion back to the main
+                // scope, where we wait if needed and return an InitPoll interface
+                // call again
+                let iface_wait_proposal = self.poll_delay_ohua(self.inner.now);
+                return Either::Left(DeviceCall::NeedsPoll(iface_wait_proposal))
             }
-
-
+            // ToDo: I need to refactor this such that the device also
+            //  returns an Either and not neccessarily an interface call thats never used
+            InterfaceCall::ProcessWait(_,_) => todo!()
         }
     }
 

@@ -74,6 +74,11 @@ impl<'a> Device<'a> for TunTapInterface {
             lower: self.lower.clone(),
         })
     }
+
+    ///Dummy function to resemble m3 device interface
+    fn needs_poll(&self) -> bool {
+        true
+    }
 }
 
 #[doc(hidden)]

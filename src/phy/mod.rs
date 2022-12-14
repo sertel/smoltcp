@@ -90,7 +90,7 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
 )]
 
 use core::fmt::Debug;
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 use crate::{Error, Result};
 use crate::iface::{InterfaceCall, InterfaceState};
 
@@ -107,8 +107,6 @@ mod loopback;
 mod pcap_writer;
 #[cfg(all(feature = "phy-raw_socket", unix))]
 mod raw_socket;
-#[cfg(feature = "ohua")]
-mod phy_ohua_raw_socket;
 mod tracer;
 #[cfg(all(
     feature = "phy-tuntap_interface",
@@ -129,8 +127,6 @@ pub use self::loopback::{Loopback, BrokenLoopback};
 pub use self::pcap_writer::{PcapLinkType, PcapMode, PcapSink, PcapWriter};
 #[cfg(all(feature = "phy-raw_socket", unix))]
 pub use self::raw_socket::RawSocket;
-#[cfg(feature = "ohua")]
-pub use self::phy_ohua_raw_socket::OhuaRawSocket;
 pub use self::tracer::Tracer;
 #[cfg(all(
     feature = "phy-tuntap_interface",
@@ -364,6 +360,10 @@ pub trait Device<'a> {
 
     }
 
+    /// Thi function returns true when the device is ready to be used
+    /// in poll again. It resembles the implementation in M3
+    fn needs_poll(&self) -> bool;
+
     // ToDo: To keep it simple we currently just send around a simple Ok
     //       instead of a token. Can this lead to requesting from one device,
     //       while sending with another? (Not in pur code but in general)
@@ -381,7 +381,10 @@ pub trait Device<'a> {
                 => InterfaceCall::LoopIngress(self.send_tokenfree(timestamp, packet)),
             DeviceCall::Receive(timestamp)
                 => InterfaceCall::ProcessIngress(self.receive_tokenfree(timestamp)),
-
+            DeviceCall::NeedsPoll(socket_wait_duration)
+            // This is actually pretty clumsy, we do not want the interface to
+            // process the waiting but we need to return an interface call here
+                => InterfaceCall::ProcessWait(socket_wait_duration, self.needs_poll()),
         }
     }
 }
@@ -421,4 +424,5 @@ pub enum DeviceCall{
     Transmit,
     Consume(Instant, Vec<u8>, InterfaceState),
     Receive(Instant),
+    NeedsPoll(Option<Duration>),
 }

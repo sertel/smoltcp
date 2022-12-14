@@ -199,6 +199,10 @@ where
             .transmit()
             .map(move |token| TxToken { token, sink, mode })
     }
+    ///Dummy function to resemble m3 device interface
+    fn needs_poll(&self) -> bool {
+        true
+    }
 }
 
 #[doc(hidden)]

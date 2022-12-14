@@ -11,12 +11,11 @@ use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 use smoltcp::{Result};
 use std::str;
 
-pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapInterface,  RawFd)
+pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapInterface)
 {
     let mut out_packet_buffer = vec![];// [0u8; 1280];
     // First init the device
     let mut device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
-    let file_descriptor = device.as_raw_fd();
 
     // Second: assemble the interface components
     let neighbor_cache = NeighborCache::new(BTreeMap::new());
@@ -36,9 +35,6 @@ pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapI
 
     let mut builder = InterfaceBuilder::new(sockets).ip_addrs(ip_addrs);
 
-    //ToDo: fragments, outpacket and 6loWPAN are guarded by compiler flags.
-    //      However, if I don't init them I get a panic from the Builder
-    //      -> clarify why/is there is no default and if there should be one.
     let ipv4_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
     builder = builder.ipv4_fragments_cache(ipv4_frag_cache);
 
@@ -53,23 +49,17 @@ pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapI
     }
     let mut iface = builder.finalize(&mut device);
     let tcp_socket_handle = iface.add_socket(tcp_socket);
-    (iface, vec![tcp_socket_handle],  device, file_descriptor)
+    (iface, vec![tcp_socket_handle],  device)
 }
 
-// ToDo: The SocketSet contains a 'ManagedSlice' of sockets and this seems to borrow
-//       Sockets/Buffers so I need a lifetime annotation here
-//       What does it mean to make it static, in particular considering that we will
-//       send it between stack and app?
-pub fn init_app_and_sockets(handles:Vec<SocketHandle>) -> (App, Messages){
+// ToDo: Its not particularly useful to have socket refs in the app any
+//  more since it really only processes one message per request
+pub fn init_app(handles:Vec<SocketHandle>) -> App {
     let store = Store::default();
-    let messages =  handles
-        .iter()
-        .map(|handle| (*handle, vec![])).collect();
-    (App{ store, tcp_socket_handles: handles}, messages)
+    App{ store, tcp_socket_handles: handles}
 }
 
-// ToDo: For now the App has just one socket but I'll need a more sophisticated way
-//       to store/identify handles for different sockets
+
 pub struct App {
     store: Store,
     tcp_socket_handles: Vec<SocketHandle>,

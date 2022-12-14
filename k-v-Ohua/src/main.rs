@@ -1,16 +1,28 @@
 mod ohua_util;
 
 
-use std::os::unix::io::RawFd;
-use ohua_util::init_components::{init_app_and_sockets, init_stack_and_device};
+use ohua_util::init_components::{init_app, init_stack_and_device};
 use smoltcp::{Either, Result};
 use smoltcp::iface::{Interface, SocketSet, InterfaceCall, Messages, SocketHandle};
-use smoltcp::phy::{Device, Loopback, TunTapInterface, wait as phy_wait};
+use smoltcp::phy::{Device, Loopback, TunTapInterface};
 use smoltcp::time::Instant;
+use std::{thread};
+use std::time::Duration;
 use crate::ohua_util::init_components::App;
 
-// This is just a wrapper as Ohua might not like literals
-fn should_continue() -> bool {true}
+fn maybe_wait(call: InterfaceCall) -> InterfaceCall {
+    match call {
+        InterfaceCall::ProcessWait(duration, dev_sgn) =>
+            {
+                if let Some(smoltcp_duration) = duration {
+                thread::sleep(Duration::from_micros(smoltcp_duration.micros()))
+                }
+                return  InterfaceCall::InitPoll
+            },
+        other_call => other_call
+    }
+}
+
 
 fn main() {
     println!(
@@ -28,24 +40,23 @@ fn main() {
      \/__/         \/__/         \/__/         \/__/                  \|__|
 "#
     );
-    let (mut ip_stack, handels, mut device, fd):(Interface, Vec<SocketHandle>, TunTapInterface, RawFd) = init_stack_and_device();
-    let (mut app, mut messages):(App, Messages) = init_app_and_sockets(handels);
-    //loop_as_rec(app, ip_stack, device, messages, fd)
-    let mut timestamp = Instant::now();
+    let (mut ip_stack, handels, mut device):(Interface, Vec<SocketHandle>, TunTapInterface) = init_stack_and_device();
+    let mut app: App = init_app(handels);
     let mut iface_call = InterfaceCall::InitPoll;
+
     loop {
         let device_or_app_call = ip_stack.process_call::<TunTapInterface>(iface_call);
         if Either::is_left(&device_or_app_call){
-            iface_call = device.process_call(device_or_app_call.left_or_panic())
+            let call = device.process_call(device_or_app_call.left_or_panic());
+            iface_call = maybe_wait(call)
         } else {
             let (readiness_has_changed, messages_new) = device_or_app_call.right_or_panic();
             let answers = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
-            phy_wait(fd, ip_stack.poll_delay_ohua(timestamp)).expect("wait error");
-            timestamp = Instant::now();
             iface_call = InterfaceCall::AnswerToSocket(answers);
         }
     }
 }
+
 
 
 /* Target:
@@ -69,75 +80,3 @@ fn loop_as_rec(app, ip_stack, device, sockets, call) {
 
 
 */
-
-/*
-current structure
-outer_loop {
-    timestamp = Instant::now();
-    poll_result = inner_loop(timestamp, iface, device, sockets)
-    app_result = app.do_stuff(poll_result)
-    outer_loop()
-}
-
-*/
-
-// The timestamp is taken every time before we call poll, and then
-// set in the inner interface
-// The same timestamp is used in each round to call poll_delay
-// which again sets the inner.now value to that same timestamp
-// The problem is, that poll_delay takes thi sockets after they have
-// been altered by the app
-// so poll_delay is called with sockets from the 'next call' and timestamp from
-// the current call (or current and last respectively)
-// This means we can call poll_delay before we process the sockets. But we
-/// can not 'wait' inside the interface because `phy_wait()` uses a
-/// file descriptor to check when the device is available. I don't know how
-/// we can realize this in M3.
-
-fn loop_as_rec(
-    mut app:App, mut ip_stack: Interface,
-    mut device:TunTapInterface, messages:Messages,
-    fd:RawFd) -> ()
-    {
-    let timestamp = Instant::now();
-    let (poll_res, mut ip_stack_poll, device_poll, messages_poll):
-        (Result<bool>, Interface, TunTapInterface, Messages) =
-        poll_recursion_on_call(ip_stack, InterfaceCall::InitPoll, device);
-
-    let messages_do_app_stuff: Messages = app.do_app_stuff(poll_res, messages_poll);
-        
-    phy_wait(fd, ip_stack_poll.poll_delay_ohua(timestamp)).expect("wait error");
-
-
-    if should_continue() {
-        loop_as_rec(app, ip_stack_poll, device_poll, messages_do_app_stuff, fd)
-    } else { () }
-}
-
-// this is currently just the outer poll loop + the egress loop
-fn poll_recursion_on_call<'a, D>(
-    mut ip_stack: Interface<'a>,
-    iface_call: InterfaceCall,
-    mut device: D
-    ) -> (Result<bool>, Interface<'a>, D, Messages)
-    where D: for<'d> Device<'d>,
-    {
-        let device_call_or_return = ip_stack.process_call::<D>(iface_call);
-        if Either::is_left(&device_call_or_return){
-            let next_iface_call = device.process_call(device_call_or_return.left_or_panic());
-            poll_recursion_on_call(ip_stack, next_iface_call, device)
-        } else {
-            let (readiness_has_changed, messages_new) = device_call_or_return.right_or_panic();
-            (Ok(readiness_has_changed), ip_stack, device, messages_new)
-        }
-    }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    #[test]
-    fn test_app() {
-        main()
-    }
-
-}

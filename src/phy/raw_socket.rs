@@ -83,6 +83,10 @@ impl<'a> Device<'a> for RawSocket {
             Err(err) => panic!("{}", err),
         }
     }
+    ///Dummy function to resemble m3 device interface
+    fn needs_poll(&self) -> bool {
+        true
+    }
 
     fn transmit(&'a mut self) -> Option<Self::TxToken> {
         Some(TxToken {
