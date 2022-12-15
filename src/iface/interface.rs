@@ -84,7 +84,6 @@ pub enum InterfaceCall{
     // iterates to nex socket & packet
     UpdateEgressState,
     AnswerToSocket(Vec<(SocketHandle, Vec<u8>)>),
-    ProcessWait(Option<Duration>, bool),
 }
 
 // Calls to device overlap for Ingress and
@@ -1248,9 +1247,6 @@ impl<'a> Interface<'a> {
                 let iface_wait_proposal = self.poll_delay_ohua(self.inner.now);
                 return Either::Left(DeviceCall::NeedsPoll(iface_wait_proposal))
             }
-            // ToDo: I need to refactor this such that the device also
-            //  returns an Either and not neccessarily an interface call thats never used
-            InterfaceCall::ProcessWait(_,_) => todo!()
         }
     }
 

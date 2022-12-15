@@ -91,7 +91,7 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
 
 use core::fmt::Debug;
 use crate::time::{Duration, Instant};
-use crate::{Error, Result};
+use crate::{Either, Error, Result};
 use crate::iface::{InterfaceCall, InterfaceState};
 
 #[cfg(all(
@@ -362,7 +362,7 @@ pub trait Device<'a> {
 
     /// Thi function returns true when the device is ready to be used
     /// in poll again. It resembles the implementation in M3
-    fn needs_poll(&self) -> bool;
+    fn needs_poll(&self, max_duration:Option<Duration>) -> bool;
 
     // ToDo: To keep it simple we currently just send around a simple Ok
     //       instead of a token. Can this lead to requesting from one device,
@@ -370,21 +370,21 @@ pub trait Device<'a> {
     fn process_call(
         &'a mut self,
         dev_call_state:DeviceCall
-    ) -> InterfaceCall
+    ) -> Either<InterfaceCall, (Option<Duration>, bool)>
     {
         match dev_call_state {
             DeviceCall::Transmit
-                => InterfaceCall::InnerDispatchLocal(self.transmit_tokenfree()),
+                => Either::Left(InterfaceCall::InnerDispatchLocal(self.transmit_tokenfree())),
             DeviceCall::Consume(timestamp,packet, InterfaceState::Egress)
-                => InterfaceCall::MatchSocketDispatchAfter(self.send_tokenfree(timestamp, packet)),
+                => Either::Left(InterfaceCall::MatchSocketDispatchAfter(self.send_tokenfree(timestamp, packet))),
             DeviceCall::Consume(timestamp,packet, InterfaceState::Ingress)
-                => InterfaceCall::LoopIngress(self.send_tokenfree(timestamp, packet)),
+                => Either::Left(InterfaceCall::LoopIngress(self.send_tokenfree(timestamp, packet))),
             DeviceCall::Receive(timestamp)
-                => InterfaceCall::ProcessIngress(self.receive_tokenfree(timestamp)),
+                => Either::Left(InterfaceCall::ProcessIngress(self.receive_tokenfree(timestamp))),
             DeviceCall::NeedsPoll(socket_wait_duration)
             // This is actually pretty clumsy, we do not want the interface to
             // process the waiting but we need to return an interface call here
-                => InterfaceCall::ProcessWait(socket_wait_duration, self.needs_poll()),
+                => Either::Right((socket_wait_duration, self.needs_poll(socket_wait_duration))),
         }
     }
 }

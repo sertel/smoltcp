@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use alloc::VecDeque;
 
 use crate::phy::{self, Device, DeviceCapabilities, Medium};
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 use crate::Result;
 
 /// A loopback device.
@@ -57,7 +57,9 @@ impl<'a> Device<'a> for Loopback {
         })
     }
 
-    fn needs_poll(&self) -> bool {true}
+    fn needs_poll(&self, _duration:Option<Duration>) -> bool {
+        true
+    }
 }
 
 #[doc(hidden)]
@@ -109,7 +111,7 @@ impl Loopback{
 
      */
 }
-// A constantly "exhausted" loopback device for tesing.
+// A constantly "exhausted" loopback device for testing.
 #[derive(Debug)]
 pub struct BrokenLoopback {
     queue: VecDeque<Vec<u8>>,
@@ -152,7 +154,7 @@ impl<'a> Device<'a> for BrokenLoopback {
         }
     }
     ///Dummy function to resemble m3 device interface
-    fn needs_poll(&self) -> bool {
+    fn needs_poll(&self, duration:Option<Duration>) -> bool {
         true
     }
 

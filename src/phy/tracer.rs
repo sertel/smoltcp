@@ -1,7 +1,7 @@
 use core::fmt;
 
 use crate::phy::{self, Device, DeviceCapabilities, Medium};
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 use crate::{
     wire::pretty_print::{PrettyIndent, PrettyPrint},
     Result,
@@ -90,8 +90,8 @@ where
         })
     }
     ///Dummy function to resemble m3 device interface
-    fn needs_poll(&self) -> bool {
-        true
+    fn needs_poll(&self, duration:Option<Duration>) -> bool {
+        self.inner.needs_poll(duration)
     }
 }
 
