@@ -11,6 +11,8 @@ use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 use smoltcp::{Result};
 use std::str;
 
+pub(crate) type AppCall = (Result<bool>, Messages);
+
 pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapInterface)
 {
     let mut out_packet_buffer = vec![];// [0u8; 1280];
@@ -70,10 +72,10 @@ impl App {
 
     pub fn do_app_stuff(
         &mut self,
-        poll_res: Result<bool>,
-        mut messages:Messages
+        app_call:AppCall,
     ) -> Messages
     {
+    let (poll_res, messages) = app_call;
     match poll_res {
             Ok(_) => {}
             Err(e) => {

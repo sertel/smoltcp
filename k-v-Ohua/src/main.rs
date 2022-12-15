@@ -4,11 +4,11 @@ mod ohua_util;
 use ohua_util::init_components::{init_app, init_stack_and_device};
 use smoltcp::{Either, Result};
 use smoltcp::iface::{Interface, SocketSet, InterfaceCall, Messages, SocketHandle};
-use smoltcp::phy::{Device, Loopback, TunTapInterface};
+use smoltcp::phy::{Device, DeviceCall, Loopback, TunTapInterface};
 use smoltcp::time::{Instant, Duration as smolDuration};
 use std::{thread};
 use std::time::Duration;
-use crate::ohua_util::init_components::App;
+use crate::ohua_util::init_components::{App, AppCall};
 
 fn should_continue()-> bool {true}
 
@@ -24,6 +24,13 @@ fn maybe_wait(call: Either<InterfaceCall, (Option<smolDuration>, bool)>) -> Inte
    }
 }
 
+
+fn unwrap_call(call: Either<DeviceCall, (bool, Messages)>) -> (bool, Option<DeviceCall>, Option<AppCall>) {
+    match call {
+        Either::Left(device_call) => (true, Some(device_call), None),
+        Either::Right(app_input) => (false, None, Some(AppCall(app_input)))
+    }
+}
 
 fn main() {
     println!(
@@ -45,7 +52,8 @@ fn main() {
     let mut app: App = init_app(handels);
     let mut iface_call = InterfaceCall::InitPoll;
 
-    //loop_as_rec_limited(app, ip_stack, device, iface_call, 0)
+    /*
+    loop_as_rec_limited(app, ip_stack, device, iface_call, 0)
 
     loop {
         let device_or_app_call = ip_stack.process_call::<TunTapInterface>(iface_call);
@@ -57,6 +65,46 @@ fn main() {
             let answers = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
             iface_call = InterfaceCall::AnswerToSocket(answers);
         }
+    }*/
+    app_iface_rec(app, ip_stack, device, iface_call)
+
+}
+
+fn app_iface_rec(
+    mut app: App,
+    mut ip_stack: Interface,
+    mut device: TunTapInterface,
+    mut if_call: InterfaceCall,
+    ) -> () {
+
+    let device_or_app_call: Either<DeviceCall, (bool, Messages)> = ip_stack.process_call::<TunTapInterface>(if_call);
+    // actually at this point we know it's a device_call
+    let dev_call: DeviceCall = device_or_app_call.left_or_panic();
+    let (app_call, ip_stack_n, device_n): (AppCall, Interface, TunTapInterface)
+        = iface_device_rec(ip_stack, device, dev_call);
+    let nothing: () = dummy();
+    let answers: Messages = app.do_app_stuff(app_call);
+    let if_call_new: InterfaceCall = InterfaceCall::AnswerToSocket(answers);
+    if should_continue() {
+        app_iface_rec(app, ip_stack_n, device_n, if_call_new)
+    } else {
+        nothing
+    }
+}
+
+fn iface_device_rec(
+    mut ip_stack:Interface,
+    mut device: TunTapInterface,
+    mut dev_call:DeviceCall
+) -> (AppCall, Interface, TunTapInterface) {
+    let call: Either<InterfaceCall, (Option<smolDuration>, bool)> = device.process_call(dev_call);
+    let iface_call: InterfaceCall = maybe_wait(call);
+    let device_or_app_call: Either<DeviceCall, (bool, Messages)> = ip_stack.process_call::<TunTapInterface>(iface_call);
+    let (sign, optn_dev_call, optn_app_call): (bool, Option<DeviceCall>, Option<AppCall>) = unwrap_call(device_or_app_call);
+    if sign{
+        return iface_device_rec(ip_stack, device, optn_dev_call.unwrap())
+    } else {
+        (optn_app_call.unwrap(), ip_stack, device)
     }
 }
 
@@ -67,7 +115,7 @@ fn loop_as_rec_limited(
     mut device: TunTapInterface,
     mut if_call: InterfaceCall,
     count: i32) -> () {
-    // Without tailcall elimination, we can only test this recursive
+    // Without tail call elimination, we can only test this recursive
     // Version via limiting it to few recursions, otherwise we get an
     // instant stack overflow
     if count > 10 {return}
@@ -78,7 +126,7 @@ fn loop_as_rec_limited(
                 maybe_wait(call_or_wait)
             } else {
                 let (readiness_has_changed, messages_new) = device_or_app_call.right_or_panic();
-                let answers = app.do_app_stuff(Ok(readiness_has_changed), messages_new);
+                let answers = app.do_app_stuff(AppCall(Ok(readiness_has_changed), messages_new));
                 InterfaceCall::AnswerToSocket(answers)
             };
     if should_continue() {
