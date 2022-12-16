@@ -69,13 +69,12 @@ pub struct App {
 
 
 impl App {
-
     pub fn do_app_stuff(
         &mut self,
-        app_call:AppCall,
+        app_call:Option<AppCall>,
     ) -> Messages
     {
-    let (poll_res, messages) = app_call;
+    let (poll_res, messages) = app_call.unwrap();
     match poll_res {
             Ok(_) => {}
             Err(e) => {

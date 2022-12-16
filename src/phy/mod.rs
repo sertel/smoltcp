@@ -369,10 +369,10 @@ pub trait Device<'a> {
     //       while sending with another? (Not in pur code but in general)
     fn process_call(
         &'a mut self,
-        dev_call_state:DeviceCall
+        dev_call_state:Option<DeviceCall>
     ) -> Either<InterfaceCall, (Option<Duration>, bool)>
     {
-        match dev_call_state {
+        match dev_call_state.unwrap() {
             DeviceCall::Transmit
                 => Either::Left(InterfaceCall::InnerDispatchLocal(self.transmit_tokenfree())),
             DeviceCall::Consume(timestamp,packet, InterfaceState::Egress)

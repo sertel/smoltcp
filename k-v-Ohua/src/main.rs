@@ -10,8 +10,11 @@ use std::{thread};
 use std::time::Duration;
 use crate::ohua_util::init_components::{App, AppCall};
 
+
+///Helper function to please Ohua
 fn should_continue()-> bool {true}
 
+///Helper function to a) please Ohua and b) enable simple replacement in M3
 fn maybe_wait(call: Either<InterfaceCall, (Option<smolDuration>, bool)>) -> InterfaceCall {
    if Either::is_left(&call) {
        return call.left_or_panic()
@@ -24,13 +27,22 @@ fn maybe_wait(call: Either<InterfaceCall, (Option<smolDuration>, bool)>) -> Inte
    }
 }
 
-
+///Helper function to please Ohua
 fn unwrap_call(call: Either<DeviceCall, (bool, Messages)>) -> (bool, Option<DeviceCall>, Option<AppCall>) {
     match call {
         Either::Left(device_call) => (true, Some(device_call), None),
-        Either::Right(app_input) => (false, None, Some(AppCall(app_input)))
+        Either::Right((sign, messages)) => {
+            let call: AppCall = (Ok(sign), messages);
+            (false, None, Some(call))
+         },
     }
 }
+///Helper function to please Ohua
+fn as_some_call(call:Either<DeviceCall, (bool, Messages)>)
+    -> Option<DeviceCall> {
+    Some(call.left_or_panic())
+}
+
 
 fn main() {
     println!(
@@ -79,8 +91,8 @@ fn app_iface_rec(
 
     let device_or_app_call: Either<DeviceCall, (bool, Messages)> = ip_stack.process_call::<TunTapInterface>(if_call);
     // actually at this point we know it's a device_call
-    let dev_call: DeviceCall = device_or_app_call.left_or_panic();
-    let (app_call, ip_stack_n, device_n): (AppCall, Interface, TunTapInterface)
+    let dev_call: Option<DeviceCall> = as_some_call(device_or_app_call);
+    let (app_call, ip_stack_n, device_n): (Option<AppCall>, Interface, TunTapInterface)
         = iface_device_rec(ip_stack, device, dev_call);
     let nothing: () = dummy();
     let answers: Messages = app.do_app_stuff(app_call);
@@ -95,16 +107,16 @@ fn app_iface_rec(
 fn iface_device_rec(
     mut ip_stack:Interface,
     mut device: TunTapInterface,
-    mut dev_call:DeviceCall
-) -> (AppCall, Interface, TunTapInterface) {
+    mut dev_call:Option<DeviceCall>
+) -> (Option<AppCall>, Interface, TunTapInterface) {
     let call: Either<InterfaceCall, (Option<smolDuration>, bool)> = device.process_call(dev_call);
     let iface_call: InterfaceCall = maybe_wait(call);
     let device_or_app_call: Either<DeviceCall, (bool, Messages)> = ip_stack.process_call::<TunTapInterface>(iface_call);
     let (sign, optn_dev_call, optn_app_call): (bool, Option<DeviceCall>, Option<AppCall>) = unwrap_call(device_or_app_call);
     if sign{
-        return iface_device_rec(ip_stack, device, optn_dev_call.unwrap())
+        iface_device_rec(ip_stack, device, optn_dev_call)
     } else {
-        (optn_app_call.unwrap(), ip_stack, device)
+        (optn_app_call, ip_stack, device)
     }
 }
 
@@ -122,7 +134,7 @@ fn loop_as_rec_limited(
     let device_or_app_call = ip_stack.process_call::<TunTapInterface>(if_call);
     let if_call_new =
             if Either::is_left(&device_or_app_call){
-                let call_or_wait = device.process_call(device_or_app_call.left_or_panic());
+                let call_or_wait = device.process_call(Some(device_or_app_call.left_or_panic()));
                 maybe_wait(call_or_wait)
             } else {
                 let (readiness_has_changed, messages_new) = device_or_app_call.right_or_panic();
