@@ -5,7 +5,7 @@ use log::debug;
 
 #[derive(Clone, Default)]
 pub struct Store {
-    data: HashMap<String, String>,
+    data: HashMap<String, HashMap<String, String>>,
 }
 
 impl Store {
@@ -27,43 +27,30 @@ impl Store {
                 serde_json::to_vec(&answer).unwrap()
             },
             _ => {
+                /*
                 let fail_msg = Answer{
                     code:400,
                     data: ResponseData::FailInfo("Mal formed request".to_string()) };
-                serde_json::to_vec(&fail_msg).unwrap()
+                serde_json::to_vec(&fail_msg).unwrap()*/
+                "OK".as_bytes().to_vec()
             }
         }
     }
 
-    fn update_state(&mut self, message:Message) -> Answer {
+    fn update_state(&mut self, message:Message) -> Vec<u8> {
             match message {
-                Message::Read(read_msg) => {
-                    if let Some(val) =
-                        self.data.get(&read_msg.key) {
-                        let rec = Record{key:read_msg.key, value: val.to_string() };
-                        Answer{code:200, data:ResponseData::Record(rec)}
-                    } else {
-                        Answer{code:400, data:ResponseData::FailInfo("No such record".to_string()) }
-                    }
+                Message::Read(_) => unreachable!(),
+                Message::Write(write_msg) => {
+                    self.data.insert(write_msg.table, write_msg.value);
+                    "OK".as_bytes().to_vec()
                 },
-                Message::Insert(write_msg) => {
-                    if let None = self.data.get(&write_msg.key) {
-                        self.data.insert(write_msg.key, write_msg.value);
-                        Answer{code:201, data:ResponseData::Success }
-                    } else {
-                        Answer{code:400, data:ResponseData::FailInfo("Record already present".to_string()) }
-                    }
-                }
                 Message::Delete(del_msg) => {
-                    if let Some(val) = self.data.remove(&del_msg.key) {
-                        let rec = Record {key: del_msg.key, value: val};
-                        Answer { code: 200, data: ResponseData::Record(rec) };
-                    }
-                    Answer{code:400, data:ResponseData::FailInfo("Record was not present".to_string())}
+                    self.data.remove(&del_msg.key);
+                    "OK".as_bytes().to_vec()
                 }
                 Message::Update(write_msg) => {
-                    self.data.insert(write_msg.key, write_msg.value);
-                    Answer{code:200, data:ResponseData::Success}
+                    self.data.insert(write_msg.table, write_msg.value);
+                    "OK".as_bytes().to_vec()
                 }
             }
         }
@@ -75,7 +62,7 @@ pub enum Message {
     /// Read a value from the key-value store
     Read(RequestMsg),
     /// Write a value.
-    Insert(Record),
+    Write(Record),
     /// Delete a value
     Delete(RequestMsg),
     /// Update a given key with the new value
@@ -84,26 +71,36 @@ pub enum Message {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RequestMsg {
-    //pub table: String,
+    pub table: String,
     pub key: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Record {
-    //pub table: String,
+    pub table: String,
     pub key: String,
-    pub value: String,
+    pub value: HashMap<String, String>,
 }
 
 
 #[derive(Serialize, Clone, Debug)]
-pub struct Answer {
-    pub code: i32,
-    pub data: ResponseData,
+pub struct ResultRec<'a> {
+    pub table: String,
+    pub key: String,
+    pub value: &'a HashMap<String, String>,
 }
 
+impl<'a> ResultRec<'a> {
+    pub fn from_request(req: RequestMsg, val: &'a HashMap<String, String>) -> Self {
+        Self {
+            table: req.table,
+            key: req.key,
+            value: val,
+        }
+    }
+}
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize,Deserialize, Clone, Debug)]
 pub enum ResponseData {
     Success,
     FailInfo(String),
