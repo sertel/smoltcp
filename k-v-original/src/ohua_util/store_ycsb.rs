@@ -14,7 +14,7 @@ impl Store {
     //}
 
     pub fn handle_message(&mut self, input_bytes:&[u8]) -> Vec<u8>{
-
+        println!("Handling message");
         let mut message_bytes = input_bytes.to_vec();
         if input_bytes.ends_with(&[b'\n']) {
             debug!("ends with linefeed");
@@ -38,6 +38,7 @@ impl Store {
     }
 
     fn update_state(&mut self, message:Message) -> Vec<u8> {
+            println!("Updating state");
             match message {
                 Message::Read(_) => unreachable!(),
                 Message::Write(write_msg) => {
