@@ -79,35 +79,40 @@ fn main() {
     let mut sockets = SocketSet::new(vec![]);
     let tcp_handle = sockets.add(tcp_socket);
 
-    loop {
-        let timestamp = Instant::now();
-        match iface.poll(timestamp, &mut device, & mut sockets) {
-            Ok(_) => {}
-            Err(e) => {
-                debug!("poll error: {}", e);
-            }
-        }
-
+    let outbytes = None;
+loop {
+  let timestamp = Instant::now();
+    match iface.poll(timestamp, &mut device, & mut sockets) {
+      Ok(_) => {
         let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
         if !socket.is_open() {
             socket.listen(6969).unwrap();
         }
 
-        if socket.may_recv() {
+        if socket.can_recv() && outbytes == None {
             let input = socket.recv(process_octets).unwrap();
-            if socket.can_send() && !input.is_empty() {
-                debug!(
-                    "tcp:6969 send data: {:?}",
-                    str::from_utf8(input.as_ref()).unwrap_or("(invalid utf8)")
-                );
-                let outbytes = store.handle_message(&input);
-                println!("Got outbytes {:?}", outbytes);
-                socket.send_slice(&outbytes[..]).unwrap();
+            assert(!input.is_empty()); 
+            outbytes = Some(store.handle_message(&input));
+            println!("Got outbytes {:?}", outbytes);
+        } 
+        
+        if socket.can_send() {
+            match outbytes.take() {
+                Ok(ob) => {
+                   socket.send_slice(&ob[..]).unwrap();
+                   debug!("tcp:6969 close");
+                   socket.close();
+                }                     
+                None => ()
             }
-        } else if socket.may_send() {
-            debug!("tcp:6969 close");
-            socket.close();
         }
-        phy_wait(fd, iface.poll_delay(timestamp, &sockets)).expect("wait error");
-    }
+      }
+      Err(e) => {
+        debug!("poll error: {}", e);
+        break;
+      }
+   }
+   phy_wait(fd, 
+      iface.poll_delay(timestamp, &sockets)).expect("wait error");
+}
 }
