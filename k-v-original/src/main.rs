@@ -44,8 +44,8 @@ fn main() {
     let mut store = Store::default();
 
 
-    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 64]);
-    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 128]);
+    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 256]);
+    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 256]);
     let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
 
 
@@ -65,7 +65,7 @@ fn main() {
     builder = builder.ipv4_fragments_cache(ipv4_frag_cache);
 
 
-    let mut out_packet_buffer = [0u8; 2048];
+    let mut out_packet_buffer = [0u8; 1024];
 
     let sixlowpan_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
     builder = builder.sixlowpan_fragments_cache(sixlowpan_frag_cache).sixlowpan_out_packet_cache(&mut out_packet_buffer[..]);
@@ -78,35 +78,38 @@ fn main() {
 
     let mut sockets = SocketSet::new(vec![]);
     let tcp_handle = sockets.add(tcp_socket);
-
+    let mut out_buffer = None; 
     loop {
         let timestamp = Instant::now();
         match iface.poll(timestamp, &mut device, & mut sockets) {
-            Ok(_) => {}
+            Ok(_) => {
+                let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
+                if !socket.is_open() {
+                    socket.listen(6969).unwrap();
+                }
+
+                if socket.can_recv() && out_buffer== None {
+                    let input = socket.recv(process_octets).unwrap();
+                    assert!(!input.is_empty());
+                    out_buffer = Some(store.handle_message(&input));
+                    println!("Got input {:?}", out_buffer);
+                } 
+                
+                if socket.can_send() {
+                    match out_buffer.take() {
+                        Some(bytes) => {
+                            socket.send_slice(&bytes[..]).unwrap();
+                            println!("tcp:6969 closing");
+                            socket.close(); 
+
+                        }
+                        None => ()
+                    }
+                }
+            }
             Err(e) => {
                 debug!("poll error: {}", e);
             }
-        }
-
-        let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
-        if !socket.is_open() {
-            socket.listen(6969).unwrap();
-        }
-
-        if socket.may_recv() {
-            let input = socket.recv(process_octets).unwrap();
-            if socket.can_send() && !input.is_empty() {
-                debug!(
-                    "tcp:6969 send data: {:?}",
-                    str::from_utf8(input.as_ref()).unwrap_or("(invalid utf8)")
-                );
-                let outbytes = store.handle_message(&input);
-                println!("Got outbytes {:?}", outbytes);
-                socket.send_slice(&outbytes[..]).unwrap();
-            }
-        } else if socket.may_send() {
-            debug!("tcp:6969 close");
-            socket.close();
         }
         phy_wait(fd, iface.poll_delay(timestamp, &sockets)).expect("wait error");
     }
