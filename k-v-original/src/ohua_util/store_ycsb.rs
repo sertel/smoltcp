@@ -3,18 +3,31 @@ use std::collections::HashMap;
 use std::str;
 use log::debug;
 
-#[derive(Clone, Default)]
+
+#[derive(Clone)]
 pub struct Store {
     data: HashMap<String, HashMap<String, String>>,
+    defaultAnswer: Record,
 }
 
 impl Store {
-    //pub fn default() -> Store {
-      //  unimplemented!()
-    //}
+    pub fn default() -> Store {
+        Store {
+            data: HashMap::new(),
+            defaultAnswer: Record{
+                table:"defaultTable".to_owned(),
+                key:"defaultKey".to_owned(),
+                value: HashMap::from([
+                    ("field1".to_owned(), "spring".to_owned()), 
+                    ("field2".to_owned(), "summer".to_owned()), 
+                    ("field3".to_owned(), "autumn".to_owned()), 
+                    ("field4".to_owned(), "summer again, because why not".to_owned())]),
+            }            
+        }
+    }
 
     pub fn handle_message(&mut self, input_bytes:&[u8]) -> Vec<u8>{
-        println!("Handling message");
+        //println!("Handling message");
         let mut message_bytes = input_bytes.to_vec();
         if input_bytes.ends_with(&[b'\n']) {
             debug!("ends with linefeed");
@@ -22,9 +35,11 @@ impl Store {
         }
 
         match serde_json::from_slice(&message_bytes) {
+            
             Ok(message) => {
                 let answer = self.update_state(message);
-                serde_json::to_vec(&answer).unwrap()
+                //serde_json::to_vec(&answer).unwrap()
+                answer
             },
             _ => {
                 /*
@@ -38,9 +53,9 @@ impl Store {
     }
 
     fn update_state(&mut self, message:Message) -> Vec<u8> {
-            println!("Updating state");
+            //println!("Updating state");
             match message {
-                Message::Read(_) => unreachable!(),
+                Message::Read(_) => "OK".as_bytes().to_vec(), //serde_json::to_vec(&self.defaultAnswer).unwrap(),
                 Message::Write(write_msg) => {
                     self.data.insert(write_msg.table, write_msg.value);
                     "OK".as_bytes().to_vec()
@@ -107,4 +122,6 @@ pub enum ResponseData {
     FailInfo(String),
     Record(Record),
 }
+
+
 

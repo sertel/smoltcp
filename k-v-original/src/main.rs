@@ -6,6 +6,7 @@ use std::str;
 
 use log::debug;
 use ohua_util::store_ycsb::Store;
+//use ohua_util::store::Store;
 use smoltcp::iface::{FragmentsCache, InterfaceBuilder, NeighborCache, SocketSet};
 use smoltcp::phy::{Device, Medium, TunTapInterface, wait as phy_wait};
 use smoltcp::socket::{tcp};
@@ -44,8 +45,8 @@ fn main() {
     let mut store = Store::default();
 
 
-    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 64]);
-    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 128]);
+    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
     let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
 
 
@@ -65,7 +66,7 @@ fn main() {
     builder = builder.ipv4_fragments_cache(ipv4_frag_cache);
 
 
-    let mut out_packet_buffer = [0u8; 2048];
+    let mut out_packet_buffer = [0u8; 1024];
 
     let sixlowpan_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
     builder = builder.sixlowpan_fragments_cache(sixlowpan_frag_cache).sixlowpan_out_packet_cache(&mut out_packet_buffer[..]);
@@ -89,6 +90,7 @@ fn main() {
         }
 
         let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
+        //println!("State {:?}", socket.state());
         if !socket.is_open() {
             socket.listen(6969).unwrap();
         }
@@ -96,16 +98,17 @@ fn main() {
         if socket.may_recv() {
             let input = socket.recv(process_octets).unwrap();
             if socket.can_send() && !input.is_empty() {
-                debug!(
-                    "tcp:6969 send data: {:?}",
+                println!(
+                    "Input {:?}",
                     str::from_utf8(input.as_ref()).unwrap_or("(invalid utf8)")
                 );
                 let outbytes = store.handle_message(&input);
-                println!("Got outbytes {:?}", outbytes);
+                //println!("Got outbytes {:?}", str::from_utf8(&outbytes));
                 socket.send_slice(&outbytes[..]).unwrap();
-            }
+                
+            } 
         } else if socket.may_send() {
-            debug!("tcp:6969 close");
+            println!("tcp:6969 close");
             socket.close();
         }
         phy_wait(fd, iface.poll_delay(timestamp, &sockets)).expect("wait error");

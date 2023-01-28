@@ -3,7 +3,8 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::RawFd;
 use log::debug;
 
-use crate::ohua_util::store::Store;
+//use crate::ohua_util::store::Store;
+use crate::ohua_util::store_ycsb::Store;
 use smoltcp::iface::{FragmentsCache, NeighborCache, SocketHandle, SocketSet, Interface, InterfaceBuilder, Messages};
 use smoltcp::phy::{Device, Medium, TunTapInterface};
 use smoltcp::socket::{tcp};
@@ -29,8 +30,8 @@ pub fn init_stack_and_device() -> (Interface<'static>,Vec<SocketHandle>, TunTapI
     // Third assemble the sockets and the interface
     let mut sockets = vec![];
 
-    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 64]);
-    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 128]);
+    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
     let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
 
     let mut builder = InterfaceBuilder::new(sockets).ip_addrs(ip_addrs);

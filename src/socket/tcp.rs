@@ -367,7 +367,7 @@ pub struct Socket<'a> {
     assembler: Assembler,
     rx_buffer: SocketBuffer<'a>,
     rx_fin_received: bool,
-    tx_buffer: SocketBuffer<'a>,
+    pub tx_buffer: SocketBuffer<'a>,
     /// Interval after which, if no inbound packets are received, the connection is aborted.
     timeout: Option<Duration>,
     /// Interval at which keep-alive packets will be sent.

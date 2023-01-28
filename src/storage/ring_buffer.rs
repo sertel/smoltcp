@@ -2,7 +2,7 @@
 // these functions may have side effects, and it's implemented by [RFC 1940].
 // [RFC 1940]: https://github.com/rust-lang/rust/issues/43302
 
-use core::cmp;
+use core::{cmp, fmt::Debug};
 use managed::ManagedSlice;
 
 use crate::storage::Resettable;
@@ -109,6 +109,12 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     fn get_idx_unchecked(&self, idx: usize) -> usize {
         (self.read_at + idx) % self.capacity()
     }
+
+    pub fn show_content(&self) 
+    where T:Debug{
+        println!("{:?}", self.storage);
+    }
+
 }
 
 /// This is the "discrete" ring buffer interface: it operates with single elements,
