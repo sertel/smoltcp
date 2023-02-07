@@ -110,11 +110,12 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
         (self.read_at + idx) % self.capacity()
     }
 
-    pub fn show_content(&self) 
-    where T:Debug{
+    pub fn show_content(&self)
+    where
+        T: Debug,
+    {
         println!("{:?}", self.storage);
     }
-
 }
 
 /// This is the "discrete" ring buffer interface: it operates with single elements,

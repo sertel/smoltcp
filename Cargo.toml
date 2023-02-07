@@ -122,6 +122,10 @@ name = "benchmark"
 required-features = ["std", "medium-ethernet", "medium-ip", "phy-tuntap_interface", "proto-ipv4", "socket-raw", "socket-udp"]
 
 [[example]]
+name = "benchmark_ohua"
+required-features = ["std","ohua", "medium-ethernet", "medium-ip", "phy-tuntap_interface", "proto-ipv4", "socket-raw", "socket-udp"]
+
+[[example]]
 name = "dhcp_client"
 required-features = ["std", "medium-ethernet", "medium-ip", "phy-tuntap_interface", "proto-ipv4", "proto-dhcpv4", "socket-raw"]
 
