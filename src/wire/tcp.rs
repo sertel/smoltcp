@@ -1004,29 +1004,29 @@ pub struct ReprOwned {
     pub sack_permitted: bool,
     pub sack_ranges: [Option<(u32, u32)>; 3],
     pub payload: Vec<u8>,
-    pub payload_len: usize
+    pub payload_len: usize,
 }
 
 #[cfg(feature = "ohua")]
 impl ReprOwned {
     pub fn from<'a>(tcp_repr: Repr<'a>) -> Self {
         ReprOwned {
-            src_port : tcp_repr.src_port,
-            dst_port : tcp_repr.dst_port,
-            control : tcp_repr.control,
-            seq_number : tcp_repr.seq_number,
-            ack_number : tcp_repr.ack_number,
-            window_len : tcp_repr.window_len,
-            window_scale : tcp_repr.window_scale,
-            max_seg_size : tcp_repr.max_seg_size,
-            sack_permitted : tcp_repr.sack_permitted,
-            sack_ranges : tcp_repr.sack_ranges,
+            src_port: tcp_repr.src_port,
+            dst_port: tcp_repr.dst_port,
+            control: tcp_repr.control,
+            seq_number: tcp_repr.seq_number,
+            ack_number: tcp_repr.ack_number,
+            window_len: tcp_repr.window_len,
+            window_scale: tcp_repr.window_scale,
+            max_seg_size: tcp_repr.max_seg_size,
+            sack_permitted: tcp_repr.sack_permitted,
+            sack_ranges: tcp_repr.sack_ranges,
             payload: tcp_repr.payload.to_vec(),
-            payload_len : tcp_repr.payload.len()
+            payload_len: tcp_repr.payload.len(),
         }
     }
     pub fn to(&self) -> Repr {
-        Repr{
+        Repr {
             src_port: self.src_port,
             dst_port: self.dst_port,
             control: self.control,
@@ -1037,7 +1037,7 @@ impl ReprOwned {
             max_seg_size: self.max_seg_size,
             sack_permitted: self.sack_permitted,
             sack_ranges: self.sack_ranges,
-            payload: &*self.payload
+            payload: &*self.payload,
         }
     }
 
@@ -1074,7 +1074,6 @@ impl ReprOwned {
         self.header_len() + self.payload_len
     }
 }
-
 
 impl<'a, T: AsRef<[u8]> + ?Sized> fmt::Display for Packet<&'a T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

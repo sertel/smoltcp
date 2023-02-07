@@ -90,7 +90,7 @@ where
         })
     }
     ///Dummy function to resemble m3 device interface
-    fn needs_poll(&self, duration:Option<Duration>) -> bool {
+    fn needs_poll(&self, duration: Option<Duration>) -> bool {
         self.inner.needs_poll(duration)
     }
 }

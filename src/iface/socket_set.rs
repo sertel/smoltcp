@@ -33,7 +33,7 @@ impl SocketHandle {
     pub(crate) fn as_index(&self) -> usize {
         self.0
     }
-    pub(crate) fn from_index(i:usize) -> Self {
+    pub(crate) fn from_index(i: usize) -> Self {
         SocketHandle(i)
     }
 }
@@ -97,7 +97,12 @@ impl<'s> SocketSet<'s> {
     }
 
     //Reminder: Remove this method when we don't pass around sockets any more
-    pub fn re_add_stolen_socket<T: AnySocket<'s>>(&mut self, socket: T, meta:Meta, handle: usize) -> SocketHandle {
+    pub fn re_add_stolen_socket<T: AnySocket<'s>>(
+        &mut self,
+        socket: T,
+        meta: Meta,
+        handle: usize,
+    ) -> SocketHandle {
         let put = |index: usize, slot: &mut SocketStorage<'s>, socket: Socket<'s>| {
             net_trace!("[{}]: adding", index);
             *slot = SocketStorage {
@@ -128,14 +133,14 @@ impl<'s> SocketSet<'s> {
     pub fn remove_item(&mut self, handle: usize) -> Option<Item<'s>> {
         net_trace!("[{}]: removing item", handle);
         self.sockets[handle].inner.take()
-   }
+    }
 
-   pub fn get_mut_item(&mut self, handle: usize) -> Option<&mut Item<'s>> {
+    pub fn get_mut_item(&mut self, handle: usize) -> Option<&mut Item<'s>> {
         self.sockets[handle].inner.as_mut()
-   }
+    }
 
     // Reminder: See the last two reminders
-    pub fn same(handle:SocketHandle, other:usize) -> bool {
+    pub fn same(handle: SocketHandle, other: usize) -> bool {
         handle.0 == other
     }
     /// Get a socket from the set by its handle, as mutable.
@@ -159,10 +164,10 @@ impl<'s> SocketSet<'s> {
             None => self.sockets[0].inner.take(),
             Some(socket_item) => {
                 let index = socket_item.meta.handle.0;
-                if index+1 < self.size() {
-                    self.sockets[index+1].inner.take()
+                if index + 1 < self.size() {
+                    self.sockets[index + 1].inner.take()
                 } else {
-                    return None
+                    return None;
                 }
             }
         }
@@ -213,7 +218,7 @@ impl<'s> SocketSet<'s> {
         self.sockets.iter_mut().filter_map(|x| x.inner.as_mut())
     }
 
-    pub(crate) fn size(& self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.sockets.len()
     }
 }

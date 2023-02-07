@@ -2,18 +2,20 @@
 // of RFC 1122 that discuss Ethernet, ARP and IP for any IPv4 work
 // and RFCs 8200 and 4861 for any IPv6 and NDISC work.
 
-use core::cmp;
-use std::rc::Rc;
 use core::cell::RefCell;
+use core::cmp;
 use managed::{ManagedMap, ManagedSlice};
+use std::rc::Rc;
 
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 use super::fragmentation::PacketAssemblerSet;
 use super::socket_set::{SocketSet, SocketStorage};
-use crate::iface::{Routes, SocketHandle};
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 use crate::iface::{NeighborAnswer, NeighborCache};
-use crate::phy::{ChecksumCapabilities, Device, DeviceCall, DeviceCapabilities, Medium, RxToken, TxToken};
+use crate::iface::{Routes, SocketHandle};
+use crate::phy::{
+    ChecksumCapabilities, Device, DeviceCall, DeviceCapabilities, Medium, RxToken, TxToken,
+};
 use crate::rand::Rand;
 #[cfg(feature = "socket-dhcpv4")]
 use crate::socket::dhcpv4;
@@ -22,11 +24,11 @@ use crate::socket::dns;
 use crate::socket::*;
 use crate::time::{Duration, Instant};
 use crate::wire::*;
-use crate::{Error, Result, Either};
+use crate::{Either, Error, Result};
 
-use crate::wire::ip::{Address};
+use crate::wire::ip::Address;
 
-fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
+fn process_octets(octets: &mut [u8]) -> (usize, Vec<u8>) {
     let recvd_len = octets.len();
     let data = octets.to_owned();
     // Debug print is done in the app
@@ -42,7 +44,7 @@ fn process_octets(octets:&mut [u8]) -> (usize, Vec<u8>) {
 /// Structure to replace sending to a device by local 'emission'
 /// without the need to change the api otherwise
 pub struct LocalTxToken {
-    buffer:Rc<RefCell<Vec<u8>>>,
+    buffer: Rc<RefCell<Vec<u8>>>,
 }
 
 impl TxToken for LocalTxToken {
@@ -66,7 +68,7 @@ impl LocalTxToken {
 pub type Messages = Vec<(SocketHandle, Vec<u8>)>;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub enum InterfaceCall{
+pub enum InterfaceCall {
     InitPoll,
     InitIngress,
     // ToDo: This represents the received data, the receive result and the tx token but probably there is a nicer way to do this.
@@ -103,22 +105,19 @@ pub enum InterfaceCall{
 // ToDo: I'll start with second option. Maybe refactor to first.
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub enum InterfaceState{
+pub enum InterfaceState {
     Egress,
-    Ingress
+    Ingress,
 }
 
 type PacketTwice = ((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool));
 
-fn is_packet(maybe_packet: &Either<PacketTwice, Result<()>>)
-             -> bool {
+fn is_packet(maybe_packet: &Either<PacketTwice, Result<()>>) -> bool {
     match maybe_packet {
         Either::Left(_) => true,
-        Either::Right(_) => false
+        Either::Right(_) => false,
     }
-
 }
-
 
 pub(crate) struct FragmentsBuffer<'a> {
     #[cfg(feature = "proto-ipv4-fragmentation")]
@@ -244,29 +243,28 @@ pub struct Interface<'a> {
     // State = Option<Ingress{}> | Option<Egress{}>
     current_egress_state: Option<EgressState<'a>>,
     current_ingress_state: Option<IngressState<'a>>,
-    sockets:Option<SocketSet<'a>>,
-    emitted_any:bool,
-    processed_any:bool,
-    readiness_changed:bool
+    sockets: Option<SocketSet<'a>>,
+    emitted_any: bool,
+    processed_any: bool,
+    readiness_changed: bool,
 }
 
-
-struct EgressState<'es>{
+struct EgressState<'es> {
     // We keep the interfaces sockets here during egress to mimic
     // the situation that the socket reference would be borrowed during egress
     // and becomes usable in  poll afterward
     sockets_during_egress: Option<SocketSet<'es>>,
     // We need to reuse it, doesn't live as long as the other refs
-    current_handle:Option<usize>,
+    current_handle: Option<usize>,
     // we need it just once at the end of the EgressStates lifetime
-    current_neighbor:Option<Address>,
+    current_neighbor: Option<Address>,
     current_presend_packet: Option<IpPacketOwned>,
     //Copy of the intermediate results, we need to take it out and pass it to
     //dispatch_after
-    current_postsend_packet:Option< (TcpReprP, IpRepr, bool)>
+    current_postsend_packet: Option<(TcpReprP, IpRepr, bool)>,
 }
 
-struct IngressState<'es>{
+struct IngressState<'es> {
     // We keep the interfaces sockets here during egress to mimic
     // the situation that the socket reference would be borrowed during egress
     // and becomes usable in  poll afterward
@@ -332,7 +330,7 @@ pub struct InterfaceBuilder<'a> {
     sixlowpan_fragments_cache_timeout: Duration,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     sixlowpan_out_buffer: Option<ManagedSlice<'a, u8>>,
-    sockets:SocketSet<'a>,
+    sockets: SocketSet<'a>,
 }
 
 impl<'a> InterfaceBuilder<'a> {
@@ -405,7 +403,7 @@ let iface = builder.finalize(&mut device);
             sixlowpan_fragments_cache_timeout: Duration::from_secs(60),
             #[cfg(feature = "proto-sixlowpan-fragmentation")]
             sixlowpan_out_buffer: None,
-            sockets:SocketSet::new(sockets)
+            sockets: SocketSet::new(sockets),
         }
     }
 
@@ -683,12 +681,12 @@ let iface = builder.finalize(&mut device);
                 tag,
                 rand,
             },
-            current_egress_state:None,
-            current_ingress_state:None,
-            sockets:Some(self.sockets),
+            current_egress_state: None,
+            current_ingress_state: None,
+            sockets: Some(self.sockets),
             emitted_any: false,
             processed_any: false,
-            readiness_changed:false,
+            readiness_changed: false,
         }
     }
 }
@@ -710,17 +708,17 @@ pub(crate) enum IpPacketOwned {
     Tcp((IpRepr, TcpReprP)),
 }
 
-
-impl  IpPacketOwned {
+impl IpPacketOwned {
     pub(crate) fn to_ip_packet(&self) -> IpPacket {
         match self {
-            IpPacketOwned::Tcp((ip_repr, tcp_repr_p)) =>
+            IpPacketOwned::Tcp((ip_repr, tcp_repr_p)) => {
                 IpPacket::Tcp((ip_repr.clone(), tcp_repr_p.to()))
+            }
         }
     }
     pub(crate) fn ip_repr(&self) -> IpRepr {
         match self {
-            IpPacketOwned::Tcp((ip_repr, _tcp_repr)) => ip_repr.clone()
+            IpPacketOwned::Tcp((ip_repr, _tcp_repr)) => ip_repr.clone(),
         }
     }
 }
@@ -877,14 +875,25 @@ impl<'a> Interface<'a> {
 
     /// Only for testing purpose
     fn get_mut<T: AnySocket<'a>>(&mut self, handle: SocketHandle) -> &mut T {
-        if self.sockets.is_some(){
+        if self.sockets.is_some() {
             self.sockets.as_mut().unwrap().get_mut(handle)
         } else if self.current_egress_state.is_some() {
-            self.current_egress_state.as_mut().unwrap().sockets_during_egress.as_mut().unwrap().get_mut(handle)
+            self.current_egress_state
+                .as_mut()
+                .unwrap()
+                .sockets_during_egress
+                .as_mut()
+                .unwrap()
+                .get_mut(handle)
         } else {
-            self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.as_mut().unwrap().get_mut(handle)
+            self.current_ingress_state
+                .as_mut()
+                .unwrap()
+                .sockets_during_ingress
+                .as_mut()
+                .unwrap()
+                .get_mut(handle)
         }
-
     }
     //Starting here functions are wrappers
     // created during 'transormation''
@@ -893,21 +902,20 @@ impl<'a> Interface<'a> {
         for (handle, message) in messages.iter() {
             let current_socket = sockets.get_mut::<tcp::Socket>(*handle);
             if !current_socket.is_open() {
-                current_socket.listen(6969).unwrap();
+                current_socket.listen(1337).unwrap();
             }
             if current_socket.may_recv() {
                 if current_socket.can_send() && !message.is_empty() {
                     current_socket.send_slice(message).unwrap();
                 }
             } else if current_socket.may_send() {
-                net_debug!("tcp:6969 close");
+                net_debug!("tcp:1337 close");
                 current_socket.close();
             }
         }
     }
 
-    pub fn unload_sockets(&mut self) -> Messages
-    {
+    pub fn unload_sockets(&mut self) -> Messages {
         // As we iterate over the messages when loading the sockets,
         // we need to keep all handles in the vector so that every
         // socket will be used again.
@@ -926,63 +934,63 @@ impl<'a> Interface<'a> {
                     current_msg = input;
                 }
             } else if current_socket.may_send() {
-                    net_debug!("tcp:6969 close");
-                    current_socket.close();
+                net_debug!("tcp:6969 close");
+                current_socket.close();
             }
             messages.push((handle, current_msg.clone()));
         }
         messages
     }
 
-    fn match_socket_dispatch_after( &mut self) -> Result<()>
-    {
+    fn match_socket_dispatch_after(&mut self) -> Result<()> {
         //
-        let EgressState{
+        let EgressState {
             mut sockets_during_egress,
             current_handle: handle,
             current_neighbor,
             current_presend_packet,
-            current_postsend_packet: current_response
+            current_postsend_packet: current_response,
         } = self.current_egress_state.take().unwrap();
 
         let sockets_as_in_original_code = sockets_during_egress.as_mut().unwrap();
-        let item = sockets_as_in_original_code.get_mut_item(handle.unwrap()).unwrap();
-        let result = match &mut item.socket{
-            Socket::Tcp(socket) => {
-               socket.dispatch_after(self.context(), current_response.unwrap())
-            },
+        let item = sockets_as_in_original_code
+            .get_mut_item(handle.unwrap())
+            .unwrap();
+        let result = match &mut item.socket {
+            Socket::Tcp(socket) => socket.dispatch_after(self.context(), current_response.unwrap()),
             _ => panic!("Only TCP sockets supported!"),
         };
-        self.current_egress_state.replace(
-            EgressState{
-                sockets_during_egress,
-                current_handle: handle,
-                current_neighbor,
-                current_presend_packet,
-                current_postsend_packet: None,
-            });
+        self.current_egress_state.replace(EgressState {
+            sockets_during_egress,
+            current_handle: handle,
+            current_neighbor,
+            current_presend_packet,
+            current_postsend_packet: None,
+        });
         result.clone()
     }
 
-
     //ToDo: an item of iterating a socket set is this tuple type,
     //  but check if we can (autmatically) derive to use only the socket
-    fn handle_result(&mut self, result:Result<()>) -> bool
-    {
-        let EgressState{
+    fn handle_result(&mut self, result: Result<()>) -> bool {
+        let EgressState {
             mut sockets_during_egress,
             current_handle,
             current_neighbor,
             current_presend_packet,
-            current_postsend_packet
+            current_postsend_packet,
         } = self.current_egress_state.take().unwrap();
 
-        let item = sockets_during_egress.as_mut().unwrap().get_mut_item(current_handle.unwrap()).unwrap();
+        let item = sockets_during_egress
+            .as_mut()
+            .unwrap()
+            .get_mut_item(current_handle.unwrap())
+            .unwrap();
         let neighbor_addr = current_neighbor;
 
         let should_break;
         match result {
-            Err(Error::Exhausted) => should_break=true, // Device buffer full.
+            Err(Error::Exhausted) => should_break = true, // Device buffer full.
             Err(Error::Unaddressable) => {
                 // `NeighborCache` already takes care of rate limiting the neighbor discovery
                 // requests from the socket. However, without an additional rate limiting
@@ -992,7 +1000,7 @@ impl<'a> Interface<'a> {
                     self.inner.now,
                     neighbor_addr.expect("non-IP response packet"),
                 );
-                should_break=true;
+                should_break = true;
             }
             Err(err) => {
                 net_debug!(
@@ -1002,19 +1010,17 @@ impl<'a> Interface<'a> {
                 );
                 should_break = false;
             }
-            Ok(()) => should_break=false,
+            Ok(()) => should_break = false,
         }
-        self.current_egress_state.replace(
-            EgressState{
+        self.current_egress_state.replace(EgressState {
             sockets_during_egress,
             current_handle,
-            current_neighbor:None,
+            current_neighbor: None,
             current_presend_packet,
-            current_postsend_packet
+            current_postsend_packet,
         });
         should_break
     }
-
 
     // this is the end of inserted wrapper functions
     /// Get the socket context.
@@ -1024,16 +1030,12 @@ impl<'a> Interface<'a> {
         &mut self.inner
     }
 
-
     // Essentially a call to the interface should return either a call to the
     // device or a call to the app
     // We don't have calls to app right now so we just use the return values
-    pub fn process_call<D>(
-        & mut self,
-        call: InterfaceCall)
-        -> Either<DeviceCall, (bool, Messages)>
+    pub fn process_call<D>(&mut self, call: InterfaceCall) -> Either<DeviceCall, (bool, Messages)>
     where
-    D: for<'d> Device<'d>,
+        D: for<'d> Device<'d>,
     {
         match call {
             // This is essentially the entry point for the
@@ -1071,52 +1073,71 @@ impl<'a> Interface<'a> {
                 // and either loops back to `InterFaceCall::PollLoop` or returns
                 // the result of polling
                 // For now we don't have ingress so I'll jump ahead to Egress
-                return self.process_call::<D>(InterfaceCall::InitIngress)
-            },
+                return self.process_call::<D>(InterfaceCall::InitIngress);
+            }
             InterfaceCall::InitIngress => {
                 net_debug!("Socket Ingress");
                 self.processed_any = false;
-                self.current_ingress_state = Some(
-                    IngressState{
-                        sockets_during_ingress: self.sockets.take()
-                    }
-                );
-                return Either::Left(DeviceCall::Receive(self.inner.now))
-            },
-            InterfaceCall::ProcessIngress(maybe_ingress)  => {
-                if let Some((frame, receive_result, tx_token))= maybe_ingress{
+                self.current_ingress_state = Some(IngressState {
+                    sockets_during_ingress: self.sockets.take(),
+                });
+                return Either::Left(DeviceCall::Receive(self.inner.now));
+            }
+            InterfaceCall::ProcessIngress(maybe_ingress) => {
+                if let Some((frame, receive_result, tx_token)) = maybe_ingress {
                     // processed any is true as soon as some
                     // rx_token.consume is called
-                    let mut sockets = self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.take().unwrap();
-                    let processed_packet = self.process_ingress(&mut sockets, frame, receive_result, tx_token);
-                    self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.replace(sockets);
+                    let mut sockets = self
+                        .current_ingress_state
+                        .as_mut()
+                        .unwrap()
+                        .sockets_during_ingress
+                        .take()
+                        .unwrap();
+                    let processed_packet =
+                        self.process_ingress(&mut sockets, frame, receive_result, tx_token);
+                    self.current_ingress_state
+                        .as_mut()
+                        .unwrap()
+                        .sockets_during_ingress
+                        .replace(sockets);
                     self.processed_any = true;
                     if processed_packet.is_some() {
-                        return Either::Left(DeviceCall::Consume(self.inner.now, processed_packet.unwrap(), InterfaceState::Ingress))
+                        return Either::Left(DeviceCall::Consume(
+                            self.inner.now,
+                            processed_packet.unwrap(),
+                            InterfaceState::Ingress,
+                        ));
                     } else {
-                        return Either::Left(DeviceCall::Receive(self.inner.now))
+                        return Either::Left(DeviceCall::Receive(self.inner.now));
                     }
                 } else {
-                   // Nothing left to receive ->
-                   // give the sockets back and call egress
-                    let sockets = self.current_ingress_state.as_mut().unwrap().sockets_during_ingress.take().unwrap();
+                    // Nothing left to receive ->
+                    // give the sockets back and call egress
+                    let sockets = self
+                        .current_ingress_state
+                        .as_mut()
+                        .unwrap()
+                        .sockets_during_ingress
+                        .take()
+                        .unwrap();
                     self.sockets.replace(sockets);
                     net_debug!("Processed any was {}", self.processed_any);
                     return self.process_call::<D>(InterfaceCall::InitEgress);
                 }
-            },
+            }
             InterfaceCall::LoopIngress(consume_result) => {
-                if let Err(err) = consume_result{
-                        net_debug!("Failed to send response: {}", err);
+                if let Err(err) = consume_result {
+                    net_debug!("Failed to send response: {}", err);
                 }
                 // directly call device receive again, bringing us back
                 // into the ingress loop
-                return Either::Left(DeviceCall::Receive(self.inner.now))
-            },
+                return Either::Left(DeviceCall::Receive(self.inner.now));
+            }
             InterfaceCall::InitEgress => {
                 net_debug!("Socket Egress");
                 self.emitted_any = false;
-                self.current_egress_state = Some(EgressState{
+                self.current_egress_state = Some(EgressState {
                     // When we call egress, there must be sockets available
                     // and meanwhile those sockets must not be available otherwise
                     sockets_during_egress: self.sockets.take(),
@@ -1127,56 +1148,64 @@ impl<'a> Interface<'a> {
                 });
                 // ToDo: Handling the result and spinning the loop
                 //  one step froward should be separated again
-                return self.process_call::<D>(
-                    InterfaceCall::UpdateEgressState)
-
-            },
+                return self.process_call::<D>(InterfaceCall::UpdateEgressState);
+            }
             InterfaceCall::InnerDispatchLocal(sending_token) => {
                 if sending_token.is_some() {
-                    let current_presend_packet = self.current_egress_state.as_mut().unwrap().current_presend_packet.take().unwrap();
-                    let dispatch_result = self.inner.dispatch_local(current_presend_packet.to_ip_packet(), None);
+                    let current_presend_packet = self
+                        .current_egress_state
+                        .as_mut()
+                        .unwrap()
+                        .current_presend_packet
+                        .take()
+                        .unwrap();
+                    let dispatch_result = self
+                        .inner
+                        .dispatch_local(current_presend_packet.to_ip_packet(), None);
                     if dispatch_result.is_ok() {
                         let (packet, timest) = dispatch_result.unwrap();
-                        return Either::Left(DeviceCall::Consume(timest, packet, InterfaceState::Egress))
-                    }
-                    else {
+                        return Either::Left(DeviceCall::Consume(
+                            timest,
+                            packet,
+                            InterfaceState::Egress,
+                        ));
+                    } else {
                         let result = Err(dispatch_result.unwrap_err());
-                        return self.process_call::<D>(
-                    InterfaceCall::HandleResult(result))
+                        return self.process_call::<D>(InterfaceCall::HandleResult(result));
                     }
                 } else {
                     net_debug!("failed to transmit IP: {}", Error::Exhausted);
                     let result = Err(Error::Exhausted);
-                    return self.process_call::<D>(
-                    InterfaceCall::HandleResult(result))
+                    return self.process_call::<D>(InterfaceCall::HandleResult(result));
                 }
-            },
+            }
 
             InterfaceCall::MatchSocketDispatchAfter(send_result) => {
-                let result =
-                    if send_result.is_ok(){
-                        let final_result = self.match_socket_dispatch_after();
-                        self.emitted_any = true;
-                        final_result
-                    } else {
-                        Err(send_result.unwrap_err())
-                    };
+                let result = if send_result.is_ok() {
+                    let final_result = self.match_socket_dispatch_after();
+                    self.emitted_any = true;
+                    final_result
+                } else {
+                    Err(send_result.unwrap_err())
+                };
 
-                return self.process_call::<D>(
-                    InterfaceCall::HandleResult(result))
-            },
+                return self.process_call::<D>(InterfaceCall::HandleResult(result));
+            }
             InterfaceCall::HandleResult(result) => {
                 let should_break = self.handle_result(result);
                 if should_break {
                     // If the egress loop ends, we return to the poll loop
                     // and give back the sockets
-                    let EgressState{ sockets_during_egress, ..} = self.current_egress_state.take().unwrap();
+                    let EgressState {
+                        sockets_during_egress,
+                        ..
+                    } = self.current_egress_state.take().unwrap();
                     self.sockets = Some(sockets_during_egress.unwrap());
                     self.process_call::<D>(InterfaceCall::PollLoopCondition)
                 } else {
                     self.process_call::<D>(InterfaceCall::UpdateEgressState)
                 }
-            },
+            }
             InterfaceCall::UpdateEgressState => {
                 // This combines the first and the last part of the egress loop
                 // update_egress state first checks the result of the previous
@@ -1187,24 +1216,29 @@ impl<'a> Interface<'a> {
                 let maybe_next_packet = self.iterate_to_next_send();
                 if maybe_next_packet.is_some() {
                     // we remain in the egress loop
-                    return Either::Left(DeviceCall::Transmit)
-                }
-                else {
+                    return Either::Left(DeviceCall::Transmit);
+                } else {
                     // we return to the poll loop
                     // so we need to give the sockets back to the Interface and
                     // remove the EgressState
-                    let EgressState{ sockets_during_egress, ..} = self.current_egress_state.take().unwrap();
+                    let EgressState {
+                        sockets_during_egress,
+                        ..
+                    } = self.current_egress_state.take().unwrap();
                     self.sockets = Some(sockets_during_egress.unwrap());
                     net_debug!("Emitted  any was {}", self.emitted_any);
-                    return self.process_call::<D>(InterfaceCall::PollLoopCondition)
+                    return self.process_call::<D>(InterfaceCall::PollLoopCondition);
                 }
             }
             InterfaceCall::PollLoopCondition => {
                 if self.emitted_any || self.processed_any {
                     self.readiness_changed = true;
-                    return self.process_call::<D>(InterfaceCall::InitIngress)
+                    return self.process_call::<D>(InterfaceCall::InitIngress);
                 } else {
-                    net_debug!("We're done with polling. Rediness changed?: {}", self.readiness_changed);
+                    net_debug!(
+                        "We're done with polling. Rediness changed?: {}",
+                        self.readiness_changed
+                    );
                     // Now we do the socket-app-communication part
                     // Normally we'd have a loop over the sockets here, but that
                     // would add another loop betweein components so I'll keep it simpler
@@ -1229,12 +1263,12 @@ impl<'a> Interface<'a> {
                         socket.close();
                     }
                     let iface_wait_proposal = self.poll_delay_ohua(self.inner.now);
-                    return Either::Left(DeviceCall::NeedsPoll(iface_wait_proposal))
+                    return Either::Left(DeviceCall::NeedsPoll(iface_wait_proposal));
                 }
-            },
+            }
             InterfaceCall::AnswerToSocket(mut anwers) => {
                 // actually we're sure at this point that there is an answer
-                if let Some((handle, answer)) = anwers.pop(){
+                if let Some((handle, answer)) = anwers.pop() {
                     let socket = self.get_mut::<tcp::Socket>(handle);
                     socket.send_slice(&answer);
                 }
@@ -1245,13 +1279,13 @@ impl<'a> Interface<'a> {
                 // scope, where we wait if needed and return an InitPoll interface
                 // call again
                 let iface_wait_proposal = self.poll_delay_ohua(self.inner.now);
-                return Either::Left(DeviceCall::NeedsPoll(iface_wait_proposal))
+                return Either::Left(DeviceCall::NeedsPoll(iface_wait_proposal));
             }
         }
     }
 
     fn iterate_to_next_send(&mut self) -> Option<()> {
-        let EgressState{
+        let EgressState {
             sockets_during_egress,
             current_handle: handle,
             ..
@@ -1270,15 +1304,19 @@ impl<'a> Interface<'a> {
         let mut new_packet = None;
         let mut neighbor_addr = None;
         let mut new_response = None;
-        let mut next_handle =
-            if handle.is_some() {
-                handle.unwrap() + 1
-            } else { 0 };
+        let mut next_handle = if handle.is_some() {
+            handle.unwrap() + 1
+        } else {
+            0
+        };
 
         let mut sockets = sockets_during_egress.unwrap();
         while next_handle < sockets.size() {
-            let item= sockets.get_mut_item(next_handle).unwrap();
-            if item.meta.egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr)) {
+            let item = sockets.get_mut_item(next_handle).unwrap();
+            if item
+                .meta
+                .egress_permitted(inner.now, |ip_addr| inner.has_neighbor(&ip_addr))
+            {
                 let packet_or_ok = match &mut item.socket {
                     Socket::Tcp(socket) => socket.dispatch_before(inner),
                     _ => panic!("Only TCP sockets supported!"),
@@ -1289,59 +1327,58 @@ impl<'a> Interface<'a> {
                     neighbor_addr = Some(response.ip_repr().dst_addr());
                     new_packet = Some(response);
                     new_response = Some(response_and_keepalive);
-                    break
+                    break;
                 }
             }
             next_handle += 1;
         }
         let egress_continues = new_packet.is_some();
-        self.current_egress_state.replace(
-            EgressState{
-                    sockets_during_egress: Some(sockets),
-                    current_handle: Some(next_handle),
-                    current_neighbor: neighbor_addr,
-                    current_presend_packet: new_packet,
-                    current_postsend_packet: new_response,
-                });
+        self.current_egress_state.replace(EgressState {
+            sockets_during_egress: Some(sockets),
+            current_handle: Some(next_handle),
+            current_neighbor: neighbor_addr,
+            current_presend_packet: new_packet,
+            current_postsend_packet: new_response,
+        });
         if egress_continues {
-            return Some(())
+            return Some(());
         } else {
-            return None
+            return None;
         }
     }
 
     /*
-    fn early_return_fragment_stuff<D>(&mut self, timestamp: Instant, device: &mut D)
-    where
-        D: for<'d> Device<'d>,
-    {
+        fn early_return_fragment_stuff<D>(&mut self, timestamp: Instant, device: &mut D)
+        where
+            D: for<'d> Device<'d>,
+        {
 
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .ipv4_fragments
-            .remove_when(|frag| Ok(timestamp >= frag
-                .expires_at()?)) {
-            return Err(e);
-        }
+            #[cfg(feature = "proto-ipv4-fragmentation")]
+            if let Err(e) = self
+                .fragments
+                .ipv4_fragments
+                .remove_when(|frag| Ok(timestamp >= frag
+                    .expires_at()?)) {
+                return Err(e);
+            }
 
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        if let Err(e) = self
-            .fragments
-            .sixlowpan_fragments
-            .remove_when(|frag| Ok(timestamp >= frag
-                .expires_at()?)) {
-            return Err(e);
-        }
+            #[cfg(feature = "proto-sixlowpan-fragmentation")]
+            if let Err(e) = self
+                .fragments
+                .sixlowpan_fragments
+                .remove_when(|frag| Ok(timestamp >= frag
+                    .expires_at()?)) {
+                return Err(e);
+            }
 
-        #[cfg(feature = "proto-sixlowpan-fragmentation")]
-        match self.sixlowpan_egress(device) {
-            Ok(true) => return Ok(true),
-            Err(e) => return Err(e),
-            _ => (),
+            #[cfg(feature = "proto-sixlowpan-fragmentation")]
+            match self.sixlowpan_egress(device) {
+                Ok(true) => return Ok(true),
+                Err(e) => return Err(e),
+                _ => (),
+            }
         }
-    }
-*/
+    */
     /// Transmit packets queued in the given sockets, and receive packets queued
     /// in the device.
     ///
@@ -1411,7 +1448,10 @@ impl<'a> Interface<'a> {
                 break;
             }
         }
-        net_debug!("Returning readiness changed: {}", readiness_may_have_changed);
+        net_debug!(
+            "Returning readiness changed: {}",
+            readiness_may_have_changed
+        );
         Ok(readiness_may_have_changed)
     }
 
@@ -1461,11 +1501,15 @@ impl<'a> Interface<'a> {
             let processed_any = self.socket_ingress(device, sockets);
             net_debug!("Processed any was {}", processed_any);
             (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
-            net_debug!("Emitted any was {}, canary was {:?}", emitted_any, temp_canarie);
+            net_debug!(
+                "Emitted any was {}, canary was {:?}",
+                emitted_any,
+                temp_canarie
+            );
             #[cfg(feature = "proto-igmp")]
             let igmp_result = self.igmp_egress(device);
             if igmp_result.is_err() {
-                return (igmp_result, temp_canarie)
+                return (igmp_result, temp_canarie);
             }
 
             if processed_any || emitted_any {
@@ -1474,7 +1518,11 @@ impl<'a> Interface<'a> {
                 break;
             }
         }
-        net_debug!("Returning readiness changed: {}, canary: {:?}", readiness_may_have_changed, temp_canarie);
+        net_debug!(
+            "Returning readiness changed: {}, canary: {:?}",
+            readiness_may_have_changed,
+            temp_canarie
+        );
         (Ok(readiness_may_have_changed), temp_canarie)
     }
 
@@ -1524,11 +1572,15 @@ impl<'a> Interface<'a> {
             let processed_any = self.socket_ingress_state_separated(device, sockets);
             net_debug!("Processed any was {}", processed_any);
             (emitted_any, temp_canarie) = self.socket_egress(device, sockets);
-            net_debug!("Emitted any was {}, canary was {:?}", emitted_any, temp_canarie);
+            net_debug!(
+                "Emitted any was {}, canary was {:?}",
+                emitted_any,
+                temp_canarie
+            );
             #[cfg(feature = "proto-igmp")]
             let igmp_result = self.igmp_egress(device);
             if igmp_result.is_err() {
-                return (igmp_result, temp_canarie)
+                return (igmp_result, temp_canarie);
             }
 
             if processed_any || emitted_any {
@@ -1537,11 +1589,13 @@ impl<'a> Interface<'a> {
                 break;
             }
         }
-        net_debug!("Returning readiness changed: {}, canary: {:?}", readiness_may_have_changed, temp_canarie);
+        net_debug!(
+            "Returning readiness changed: {}, canary: {:?}",
+            readiness_may_have_changed,
+            temp_canarie
+        );
         (Ok(readiness_may_have_changed), temp_canarie)
     }
-
-
 
     /// Get the HardwareAddress address of the interface.
     ///
@@ -1714,7 +1768,6 @@ impl<'a> Interface<'a> {
         &mut self.inner.routes
     }
 
-
     /// Return a _soft deadline_ for calling [poll] the next time.
     /// The [Instant] returned is the time at which you should call [poll] next.
     /// It is harmless (but wastes energy) to call it before the [Instant], and
@@ -1832,11 +1885,14 @@ impl<'a> Interface<'a> {
         processed_any
     }
 
-    fn  socket_ingress_state_separated<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> bool
+    fn socket_ingress_state_separated<D>(
+        &mut self,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+    ) -> bool
     where
         D: for<'d> Device<'d>,
     {
-
         let Self {
             inner,
             fragments: ref mut _fragments,
@@ -1848,11 +1904,12 @@ impl<'a> Interface<'a> {
         while let Some((rx_token, tx_token)) = device.receive() {
             let buffer = Rc::new(RefCell::new(vec![]));
             let other_handle = buffer.clone();
-            let local_token = LocalTxToken{buffer};
+            let local_token = LocalTxToken { buffer };
             let mut received_frame = vec![];
-            let receiving_result  =
-                rx_token.consume(inner.now,
-                                 |frame| {received_frame.extend_from_slice(frame); Ok(())});
+            let receiving_result = rx_token.consume(inner.now, |frame| {
+                received_frame.extend_from_slice(frame);
+                Ok(())
+            });
 
             // Process ingress packgage locally and
             // write possible response package to local token instead
@@ -1861,7 +1918,9 @@ impl<'a> Interface<'a> {
             match inner.caps.medium {
                 #[cfg(feature = "medium-ethernet")]
                 Medium::Ethernet => {
-                    if let Some(packet) = inner.process_ethernet(sockets, &received_frame, _fragments) {
+                    if let Some(packet) =
+                        inner.process_ethernet(sockets, &received_frame, _fragments)
+                    {
                         if let Err(err) = inner.dispatch(local_token, packet) {
                             net_debug!("Failed to send response: {}", err);
                         } else {
@@ -1881,8 +1940,11 @@ impl<'a> Interface<'a> {
                 }
                 #[cfg(feature = "medium-ieee802154")]
                 Medium::Ieee802154 => {
-                    if let Some(packet) = inner.process_ieee802154(sockets, &received_frame, _fragments) {
-                        if let Err(err) = inner.dispatch_ip(local_token, packet, Some(_out_packets)) {
+                    if let Some(packet) =
+                        inner.process_ieee802154(sockets, &received_frame, _fragments)
+                    {
+                        if let Err(err) = inner.dispatch_ip(local_token, packet, Some(_out_packets))
+                        {
                             net_debug!("Failed to send response: {}", err);
                         } else {
                             responded = true;
@@ -1897,9 +1959,10 @@ impl<'a> Interface<'a> {
             // now we still need to send the reponse if there was one
             if responded {
                 let response = other_handle.take();
-                if let Err(err) = tx_token.consume(inner.now, response.len(),
-                                                   |sending_buffer| Ok(sending_buffer.clone_from_slice(&response))){
-                     net_debug!("Failed to send response: {}", err);
+                if let Err(err) = tx_token.consume(inner.now, response.len(), |sending_buffer| {
+                    Ok(sending_buffer.clone_from_slice(&response))
+                }) {
+                    net_debug!("Failed to send response: {}", err);
                 };
             };
 
@@ -1913,11 +1976,10 @@ impl<'a> Interface<'a> {
     fn process_ingress(
         &mut self,
         sockets: &mut SocketSet<'_>,
-        received_frame:Vec<u8>,
+        received_frame: Vec<u8>,
         receiving_result: Result<()>,
-        _tx_emulated_token : Option<()>,
-    ) -> Option<Vec<u8>>
-    {
+        _tx_emulated_token: Option<()>,
+    ) -> Option<Vec<u8>> {
         let Self {
             inner,
             fragments: ref mut _fragments,
@@ -1925,10 +1987,9 @@ impl<'a> Interface<'a> {
             ..
         } = self;
 
-
         let buffer = Rc::new(RefCell::new(vec![]));
         let other_handle = buffer.clone();
-        let local_token = LocalTxToken{buffer};
+        let local_token = LocalTxToken { buffer };
 
         // Process ingress packgage locally and
         // write possible response package to local token instead
@@ -1957,7 +2018,8 @@ impl<'a> Interface<'a> {
             }
             #[cfg(feature = "medium-ieee802154")]
             Medium::Ieee802154 => {
-                if let Some(packet) = inner.process_ieee802154(sockets, &received_frame, _fragments) {
+                if let Some(packet) = inner.process_ieee802154(sockets, &received_frame, _fragments)
+                {
                     if let Err(err) = inner.dispatch_ip(local_token, packet, Some(_out_packets)) {
                         net_debug!("Failed to send response: {}", err);
                     } else {
@@ -1979,8 +2041,12 @@ impl<'a> Interface<'a> {
         response
     }
 
-    fn socket_egress<D>(&mut self, device: &mut D, sockets: &mut SocketSet<'_>) -> (bool, Result<()>)
-        where
+    fn socket_egress<D>(
+        &mut self,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+    ) -> (bool, Result<()>)
+    where
         D: for<'d> Device<'d>,
     {
         let Self {
@@ -2061,7 +2127,7 @@ impl<'a> Interface<'a> {
                 #[cfg(feature = "socket-dns")]
                 Socket::Dns(ref mut socket) => socket.dispatch(inner, |inner, response| {
                     respond(inner, IpPacket::Udp(response))
-                })
+                }),
             };
             temp_canarie = result.clone();
             match result {
@@ -2194,9 +2260,7 @@ impl<'a> Interface<'a> {
     }
 }
 
-
 impl<'a> InterfaceInner<'a> {
-
     #[allow(unused)] // unused depending on whether we use the Ohua version
     pub(crate) fn dispatch_local(
         &mut self,
@@ -2205,7 +2269,7 @@ impl<'a> InterfaceInner<'a> {
     ) -> Result<(Vec<u8>, Instant)> {
         let mut buffer = Rc::new(RefCell::new(vec![]));
         let other_handle = buffer.clone();
-        let mut local_token = LocalTxToken{buffer};
+        let mut local_token = LocalTxToken { buffer };
         let dispatch_result = self.dispatch_ip(local_token, packet, _out_packet)?;
         Ok((other_handle.take(), self.now))
     }
@@ -3620,7 +3684,12 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "medium-ethernet")]
-    pub(crate) fn dispatch_ethernet<Tx, F>(&mut self, tx_token: Tx, buffer_len: usize, f: F) -> Result<()>
+    pub(crate) fn dispatch_ethernet<Tx, F>(
+        &mut self,
+        tx_token: Tx,
+        buffer_len: usize,
+        f: F,
+    ) -> Result<()>
     where
         Tx: TxToken,
         F: FnOnce(EthernetFrame<&mut [u8]>),
@@ -3850,7 +3919,6 @@ impl<'a> InterfaceInner<'a> {
             //      where 'closure' is a closure that takes a provided frame buffer (from the device)
             //      sets the HW address for that buffer, and emits the packet and ip representation content
             //      into that frame buffer
-
             Medium::Ethernet => {
                 net_debug!("looking up HW addr ...");
                 let (dst_hardware_addr, tx_token) = match self.lookup_hardware_addr(
@@ -4297,7 +4365,10 @@ impl<'a> InterfaceInner<'a> {
     }
 
     #[cfg(feature = "proto-igmp")]
-    pub(crate) fn igmp_leave_packet<'any>(&self, group_addr: Ipv4Address) -> Option<IpPacket<'any>> {
+    pub(crate) fn igmp_leave_packet<'any>(
+        &self,
+        group_addr: Ipv4Address,
+    ) -> Option<IpPacket<'any>> {
         self.ipv4_address().map(|iface_addr| {
             let igmp_repr = IgmpRepr::LeaveGroup { group_addr };
             IpPacket::Igmp((
@@ -4325,14 +4396,13 @@ mod test {
     use crate::iface::Interface;
     #[cfg(feature = "medium-ethernet")]
     use crate::iface::NeighborCache;
-    use crate::phy::{ChecksumCapabilities, Loopback, BrokenLoopback};
+    use crate::phy::{BrokenLoopback, ChecksumCapabilities, Loopback};
+    use crate::socket::tcp::test::{
+        socket_closing_with_endpoints, socket_established_with_endpoints, TestSocket,
+    };
+    use crate::wire::{IpAddress, IpEndpoint, Ipv4Address};
     #[cfg(feature = "proto-igmp")]
     use crate::{Error, Result};
-    use crate::socket::tcp::test::{
-        TestSocket,
-        socket_established_with_endpoints,
-        socket_closing_with_endpoints};
-    use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
 
     #[allow(unused)]
     fn fill_slice(s: &mut [u8], val: u8) {
@@ -4342,10 +4412,11 @@ mod test {
     }
 
     fn create<'a>() -> (Interface<'a>, SocketSet<'a>, Loopback) {
-        #[cfg(feature = "medium-ethernet")] return create_ethernet();
-        #[cfg(not(feature = "medium-ethernet"))] return create_ip();
+        #[cfg(feature = "medium-ethernet")]
+        return create_ethernet();
+        #[cfg(not(feature = "medium-ethernet"))]
+        return create_ip();
     }
-
 
     #[cfg(all(feature = "medium-ip"))]
     #[allow(unused)]
@@ -4354,18 +4425,21 @@ mod test {
         let mut device = Loopback::new(Medium::Ip);
         let ip_addrs = [
             #[cfg(feature = "proto-ipv4")]
-                IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
             #[cfg(feature = "proto-ipv6")]
-                IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
             #[cfg(feature = "proto-ipv6")]
-                IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
         let iface_builder = InterfaceBuilder::new(vec![]).ip_addrs(ip_addrs);
 
-        #[cfg(feature = "proto-ipv4-fragmentation")] let iface_builder = iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        let iface_builder =
+            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
 
-        #[cfg(feature = "proto-igmp")] let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        #[cfg(feature = "proto-igmp")]
+        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
         let iface = iface_builder.finalize(&mut device);
 
         (iface, SocketSet::new(vec![]), device)
@@ -4377,20 +4451,29 @@ mod test {
         let mut device = Loopback::new(Medium::Ethernet);
         let ip_addrs = [
             #[cfg(feature = "proto-ipv4")]
-                IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
             #[cfg(feature = "proto-ipv6")]
-                IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
             #[cfg(feature = "proto-ipv6")]
-                IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
-        let iface_builder = InterfaceBuilder::new(vec![]).hardware_addr(EthernetAddress::default().into()).neighbor_cache(NeighborCache::new(BTreeMap::new())).ip_addrs(ip_addrs);
+        let iface_builder = InterfaceBuilder::new(vec![])
+            .hardware_addr(EthernetAddress::default().into())
+            .neighbor_cache(NeighborCache::new(BTreeMap::new()))
+            .ip_addrs(ip_addrs);
 
-        #[cfg(feature = "proto-sixlowpan-fragmentation")] let iface_builder = iface_builder.sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new())).sixlowpan_out_packet_cache(vec![]);
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        let iface_builder = iface_builder
+            .sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()))
+            .sixlowpan_out_packet_cache(vec![]);
 
-        #[cfg(feature = "proto-ipv4-fragmentation")] let iface_builder = iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        let iface_builder =
+            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
 
-        #[cfg(feature = "proto-igmp")] let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        #[cfg(feature = "proto-igmp")]
+        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
         let iface = iface_builder.finalize(&mut device);
 
         (iface, SocketSet::new(vec![]), device)
@@ -4402,20 +4485,29 @@ mod test {
         let mut device = BrokenLoopback::new(Medium::Ethernet);
         let ip_addrs = [
             #[cfg(feature = "proto-ipv4")]
-                IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
+            IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8),
             #[cfg(feature = "proto-ipv6")]
-                IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
+            IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128),
             #[cfg(feature = "proto-ipv6")]
-                IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
+            IpCidr::new(IpAddress::v6(0xfdbe, 0, 0, 0, 0, 0, 0, 1), 64),
         ];
 
-        let iface_builder = InterfaceBuilder::new(vec![]).hardware_addr(EthernetAddress::default().into()).neighbor_cache(NeighborCache::new(BTreeMap::new())).ip_addrs(ip_addrs);
+        let iface_builder = InterfaceBuilder::new(vec![])
+            .hardware_addr(EthernetAddress::default().into())
+            .neighbor_cache(NeighborCache::new(BTreeMap::new()))
+            .ip_addrs(ip_addrs);
 
-        #[cfg(feature = "proto-sixlowpan-fragmentation")] let iface_builder = iface_builder.sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new())).sixlowpan_out_packet_cache(vec![]);
+        #[cfg(feature = "proto-sixlowpan-fragmentation")]
+        let iface_builder = iface_builder
+            .sixlowpan_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()))
+            .sixlowpan_out_packet_cache(vec![]);
 
-        #[cfg(feature = "proto-ipv4-fragmentation")] let iface_builder = iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        let iface_builder =
+            iface_builder.ipv4_fragments_cache(PacketAssemblerSet::new(vec![], BTreeMap::new()));
 
-        #[cfg(feature = "proto-igmp")] let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
+        #[cfg(feature = "proto-igmp")]
+        let iface_builder = iface_builder.ipv4_multicast_groups(BTreeMap::new());
         let iface = iface_builder.finalize(&mut device);
 
         (iface, SocketSet::new(vec![]), device)
@@ -4428,7 +4520,8 @@ mod test {
             rx.consume(timestamp, |pkt| {
                 pkts.push(pkt.to_vec());
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         }
         pkts
     }
@@ -4439,7 +4532,9 @@ mod test {
 
     impl TxToken for MockTxToken {
         fn consume<R, F>(self, _: Instant, _: usize, _: F) -> Result<R>
-            where F: FnOnce(&mut [u8]) -> Result<R>, {
+        where
+            F: FnOnce(&mut [u8]) -> Result<R>,
+        {
             Err(Error::Unaddressable)
         }
     }
@@ -4728,7 +4823,9 @@ mod test {
         // ICMP error response when the destination address is a
         // broadcast address and no socket is bound to the port.
         assert_eq!(
-            iface.inner.process_udp(&mut sockets, ip_repr, false, packet_broadcast.into_inner()),
+            iface
+                .inner
+                .process_udp(&mut sockets, ip_repr, false, packet_broadcast.into_inner()),
             None
         );
     }
@@ -4752,22 +4849,26 @@ mod test {
 
         let socket_handle = sockets.add(udp_socket);
 
-        #[cfg(feature = "proto-ipv6")] let src_ip = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))] let src_ip = Ipv4Address::new(0x7f, 0x00, 0x00, 0x02);
+        #[cfg(feature = "proto-ipv6")]
+        let src_ip = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))]
+        let src_ip = Ipv4Address::new(0x7f, 0x00, 0x00, 0x02);
 
         let udp_repr = UdpRepr {
             src_port: 67,
             dst_port: 68,
         };
 
-        #[cfg(feature = "proto-ipv6")] let ip_repr = IpRepr::Ipv6(Ipv6Repr {
+        #[cfg(feature = "proto-ipv6")]
+        let ip_repr = IpRepr::Ipv6(Ipv6Repr {
             src_addr: src_ip,
             dst_addr: Ipv6Address::LINK_LOCAL_ALL_NODES,
             next_header: IpProtocol::Udp,
             payload_len: udp_repr.header_len() + UDP_PAYLOAD.len(),
             hop_limit: 0x40,
         });
-        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))] let ip_repr = IpRepr::Ipv4(Ipv4Repr {
+        #[cfg(all(not(feature = "proto-ipv6"), feature = "proto-ipv4"))]
+        let ip_repr = IpRepr::Ipv4(Ipv4Repr {
             src_addr: src_ip,
             dst_addr: Ipv4Address::BROADCAST,
             next_header: IpProtocol::Udp,
@@ -4792,7 +4893,9 @@ mod test {
 
         // Packet should be handled by bound UDP socket
         assert_eq!(
-            iface.inner.process_udp(&mut sockets, ip_repr, false, packet.into_inner()),
+            iface
+                .inner
+                .process_udp(&mut sockets, ip_repr, false, packet.into_inner()),
             None
         );
 
@@ -4896,10 +4999,14 @@ mod test {
 
         let (mut iface, mut sockets, _device) = create();
 
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let src_addr = Ipv4Address([192, 168, 1, 1]);
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let dst_addr = Ipv4Address([192, 168, 1, 2]);
-        #[cfg(feature = "proto-ipv6")] let src_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-        #[cfg(feature = "proto-ipv6")] let dst_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
+        let src_addr = Ipv4Address([192, 168, 1, 1]);
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
+        let dst_addr = Ipv4Address([192, 168, 1, 2]);
+        #[cfg(feature = "proto-ipv6")]
+        let src_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        #[cfg(feature = "proto-ipv6")]
+        let dst_addr = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
 
         // UDP packet that if not truncated will cause a icmp port unreachable reply
         // to exceed the minimum mtu bytes in length.
@@ -4917,14 +5024,16 @@ mod test {
             |buf| fill_slice(buf, 0x2a),
             &ChecksumCapabilities::default(),
         );
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let ip_repr = Ipv4Repr {
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
+        let ip_repr = Ipv4Repr {
             src_addr,
             dst_addr,
             next_header: IpProtocol::Udp,
             hop_limit: 64,
             payload_len: udp_repr.header_len() + MAX_PAYLOAD_LEN,
         };
-        #[cfg(feature = "proto-ipv6")] let ip_repr = Ipv6Repr {
+        #[cfg(feature = "proto-ipv6")]
+        let ip_repr = Ipv6Repr {
             src_addr,
             dst_addr,
             next_header: IpProtocol::Udp,
@@ -4934,24 +5043,28 @@ mod test {
         let payload = packet.into_inner();
 
         // Expected packets
-        #[cfg(feature = "proto-ipv6")] let expected_icmp_repr = Icmpv6Repr::DstUnreachable {
+        #[cfg(feature = "proto-ipv6")]
+        let expected_icmp_repr = Icmpv6Repr::DstUnreachable {
             reason: Icmpv6DstUnreachable::PortUnreachable,
             header: ip_repr,
             data: &payload[..MAX_PAYLOAD_LEN],
         };
-        #[cfg(feature = "proto-ipv6")] let expected_ip_repr = Ipv6Repr {
+        #[cfg(feature = "proto-ipv6")]
+        let expected_ip_repr = Ipv6Repr {
             src_addr: dst_addr,
             dst_addr: src_addr,
             next_header: IpProtocol::Icmpv6,
             hop_limit: 64,
             payload_len: expected_icmp_repr.buffer_len(),
         };
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let expected_icmp_repr = Icmpv4Repr::DstUnreachable {
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
+        let expected_icmp_repr = Icmpv4Repr::DstUnreachable {
             reason: Icmpv4DstUnreachable::PortUnreachable,
             header: ip_repr,
             data: &payload[..MAX_PAYLOAD_LEN],
         };
-        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))] let expected_ip_repr = Ipv4Repr {
+        #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
+        let expected_ip_repr = Ipv4Repr {
             src_addr: dst_addr,
             dst_addr: src_addr,
             next_header: IpProtocol::Icmp,
@@ -4974,12 +5087,16 @@ mod test {
         // The expected packet and the generated packet are equal
         #[cfg(all(feature = "proto-ipv4", not(feature = "proto-ipv6")))]
         assert_eq!(
-            iface.inner.process_udp(&mut sockets, ip_repr.into(), false, payload),
+            iface
+                .inner
+                .process_udp(&mut sockets, ip_repr.into(), false, payload),
             Some(IpPacket::Icmpv4((expected_ip_repr, expected_icmp_repr)))
         );
         #[cfg(feature = "proto-ipv6")]
         assert_eq!(
-            iface.inner.process_udp(&mut sockets, ip_repr.into(), false, payload),
+            iface
+                .inner
+                .process_udp(&mut sockets, ip_repr.into(), false, payload),
             Some(IpPacket::Icmpv6((expected_ip_repr, expected_icmp_repr)))
         );
     }
@@ -5013,7 +5130,9 @@ mod test {
 
         // Ensure an ARP Request for us triggers an ARP Reply
         assert_eq!(
-            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface
+                .inner
+                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Reply,
                 source_hardware_addr: local_hw_addr,
@@ -5086,7 +5205,9 @@ mod test {
 
         // Ensure an Neighbor Solicitation triggers a Neighbor Advertisement
         assert_eq!(
-            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface
+                .inner
+                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             Some(EthernetPacket::Ip(IpPacket::Icmpv6((
                 ipv6_expected,
                 icmpv6_expected
@@ -5131,7 +5252,9 @@ mod test {
 
         // Ensure an ARP Request for someone else does not trigger an ARP Reply
         assert_eq!(
-            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface
+                .inner
+                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             None
         );
 
@@ -5147,9 +5270,11 @@ mod test {
     }
 
     #[test]
-    #[cfg(all(feature = "medium-ethernet",
-    feature = "proto-ipv4",
-    not(feature = "medium-ieee802154")))]
+    #[cfg(all(
+        feature = "medium-ethernet",
+        feature = "proto-ipv4",
+        not(feature = "medium-ieee802154")
+    ))]
     fn test_arp_flush_after_update_ip() {
         let (mut iface, mut sockets, _device) = create_ethernet();
 
@@ -5179,7 +5304,9 @@ mod test {
 
         // Ensure an ARP Request for us triggers an ARP Reply
         assert_eq!(
-            iface.inner.process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
+            iface
+                .inner
+                .process_ethernet(&mut sockets, frame.into_inner(), &mut iface.fragments),
             Some(EthernetPacket::Arp(ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Reply,
                 source_hardware_addr: local_hw_addr,
@@ -5296,9 +5423,15 @@ mod test {
             new_addrs.extend(addrs.to_vec());
             *addrs = From::from(new_addrs);
         });
-        assert!(iface.inner.has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002)));
-        assert!(iface.inner.has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0xffff)));
-        assert!(!iface.inner.has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0003)));
+        assert!(iface
+            .inner
+            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002)));
+        assert!(iface
+            .inner
+            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0xffff)));
+        assert!(!iface
+            .inner
+            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0003)));
     }
 
     #[test]
@@ -5370,24 +5503,27 @@ mod test {
         fn recv_igmp(device: &mut Loopback, timestamp: Instant) -> Vec<(Ipv4Repr, IgmpRepr)> {
             let caps = device.capabilities();
             let checksum_caps = &caps.checksum;
-            recv_all(device, timestamp).iter().filter_map(|frame| {
-                let ipv4_packet = match caps.medium {
-                    #[cfg(feature = "medium-ethernet")]
-                    Medium::Ethernet => {
-                        let eth_frame = EthernetFrame::new_checked(frame).ok()?;
-                        Ipv4Packet::new_checked(eth_frame.payload()).ok()?
-                    }
-                    #[cfg(feature = "medium-ip")]
-                    Medium::Ip => Ipv4Packet::new_checked(&frame[..]).ok()?,
-                    #[cfg(feature = "medium-ieee802154")]
-                    Medium::Ieee802154 => todo!(),
-                };
-                let ipv4_repr = Ipv4Repr::parse(&ipv4_packet, checksum_caps).ok()?;
-                let ip_payload = ipv4_packet.payload();
-                let igmp_packet = IgmpPacket::new_checked(ip_payload).ok()?;
-                let igmp_repr = IgmpRepr::parse(&igmp_packet).ok()?;
-                Some((ipv4_repr, igmp_repr))
-            }).collect::<Vec<_>>()
+            recv_all(device, timestamp)
+                .iter()
+                .filter_map(|frame| {
+                    let ipv4_packet = match caps.medium {
+                        #[cfg(feature = "medium-ethernet")]
+                        Medium::Ethernet => {
+                            let eth_frame = EthernetFrame::new_checked(frame).ok()?;
+                            Ipv4Packet::new_checked(eth_frame.payload()).ok()?
+                        }
+                        #[cfg(feature = "medium-ip")]
+                        Medium::Ip => Ipv4Packet::new_checked(&frame[..]).ok()?,
+                        #[cfg(feature = "medium-ieee802154")]
+                        Medium::Ieee802154 => todo!(),
+                    };
+                    let ipv4_repr = Ipv4Repr::parse(&ipv4_packet, checksum_caps).ok()?;
+                    let ip_payload = ipv4_packet.payload();
+                    let igmp_packet = IgmpPacket::new_checked(ip_payload).ok()?;
+                    let igmp_repr = IgmpRepr::parse(&igmp_packet).ok()?;
+                    Some((ipv4_repr, igmp_repr))
+                })
+                .collect::<Vec<_>>()
         }
 
         let groups = [
@@ -5400,7 +5536,9 @@ mod test {
         // Join multicast groups
         let timestamp = Instant::now();
         for group in &groups {
-            iface.join_multicast_group(&mut device, *group, timestamp).unwrap();
+            iface
+                .join_multicast_group(&mut device, *group, timestamp)
+                .unwrap();
         }
 
         let reports = recv_igmp(&mut device, timestamp);
@@ -5428,10 +5566,12 @@ mod test {
         {
             // Transmit GENERAL_QUERY_BYTES into loopback
             let tx_token = device.transmit().unwrap();
-            tx_token.consume(timestamp, GENERAL_QUERY_BYTES.len(), |buffer| {
-                buffer.copy_from_slice(GENERAL_QUERY_BYTES);
-                Ok(())
-            }).unwrap();
+            tx_token
+                .consume(timestamp, GENERAL_QUERY_BYTES.len(), |buffer| {
+                    buffer.copy_from_slice(GENERAL_QUERY_BYTES);
+                    Ok(())
+                })
+                .unwrap();
         }
         // Trigger processing until all packets received through the
         // loopback have been processed, including responses to
@@ -5442,7 +5582,9 @@ mod test {
         // Leave multicast groups
         let timestamp = Instant::now();
         for group in &groups {
-            iface.leave_multicast_group(&mut device, *group, timestamp).unwrap();
+            iface
+                .leave_multicast_group(&mut device, *group, timestamp)
+                .unwrap();
         }
 
         let leaves = recv_igmp(&mut device, timestamp);
@@ -5462,7 +5604,8 @@ mod test {
         let (mut iface, mut sockets, _device) = create();
 
         let packets = 1;
-        let rx_buffer = raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
+        let rx_buffer =
+            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
         let tx_buffer = raw::PacketBuffer::new(
             vec![raw::PacketMetadata::EMPTY; packets],
             vec![0; 48 * packets],
@@ -5549,7 +5692,8 @@ mod test {
         assert!(socket.can_send());
 
         let packets = 1;
-        let raw_rx_buffer = raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
+        let raw_rx_buffer =
+            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; packets], vec![0; 48 * 1]);
         let raw_tx_buffer = raw::PacketBuffer::new(
             vec![raw::PacketMetadata::EMPTY; packets],
             vec![0; 48 * packets],
@@ -5588,7 +5732,8 @@ mod test {
         };
 
         // Emit to frame
-        let mut bytes = vec![0u8; ipv4_repr.buffer_len() + udp_repr.header_len() + UDP_PAYLOAD.len()];
+        let mut bytes =
+            vec![0u8; ipv4_repr.buffer_len() + udp_repr.header_len() + UDP_PAYLOAD.len()];
         let frame = {
             ipv4_repr.emit(
                 &mut Ipv4Packet::new_unchecked(&mut bytes),
@@ -5630,9 +5775,8 @@ mod test {
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_normal_poll() {
-        use crate::socket::tcp::test::{
-            socket_established_with_endpoints, TestSocket};
-        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
+        use crate::socket::tcp::test::{socket_established_with_endpoints, TestSocket};
+        use crate::wire::{IpAddress, IpEndpoint, Ipv4Address};
         //smoltcp - the usual way
         net_debug!("\n Normal poll");
         let (mut iface1, mut sockets1, mut device1) = create();
@@ -5640,12 +5784,13 @@ mod test {
         let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                port: 80
+                port: 80,
             },
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                port: 49500
-            });
+                port: 49500,
+            },
+        );
 
         //iface1.inner = Some(cx);
         // Devices sending buffer should be empty
@@ -5666,18 +5811,19 @@ mod test {
         // Enqueue the message in the sockets sending buffer
         let result_len = socket1.send_slice(msg);
         assert_eq!(result_len, Ok(msg_len));
-        let (had_egress, last_socket_result) = iface1.test_poll(timestamp, &mut device1, &mut sockets1);
+        let (had_egress, last_socket_result) =
+            iface1.test_poll(timestamp, &mut device1, &mut sockets1);
         assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
         // Make sure the data arrived at the device level:
         /* socket_egress gets a sending token from the device, passes is through
-         socket.dispatch() and (in this case) device.transmi()
-         -> inner_interface.dispatch()
-         -> inner_interface.dispatch_ip()
-         -> inner_interface.dispatch_ethernet()
-         ->  token.consume()
-         The consume function for Loopback interfaces causes the assembled packet representation
-         to be pushed to the devices Tx queue. So that's where we'd expect to see the packet afterwards
-         */
+        socket.dispatch() and (in this case) device.transmi()
+        -> inner_interface.dispatch()
+        -> inner_interface.dispatch_ip()
+        -> inner_interface.dispatch_ethernet()
+        ->  token.consume()
+        The consume function for Loopback interfaces causes the assembled packet representation
+        to be pushed to the devices Tx queue. So that's where we'd expect to see the packet afterwards
+        */
         // TODO: I need a function to build the comparison packet
         // (btw. mock packets seem to be needed quite often so ...
         // Devices sending buffer dosn't contain packet any more since it's a
@@ -5687,9 +5833,8 @@ mod test {
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_ingress_modified_poll() {
-        use crate::socket::tcp::test::{
-            socket_established_with_endpoints, TestSocket};
-        use crate::wire::{IpEndpoint, Ipv4Address, IpAddress};
+        use crate::socket::tcp::test::{socket_established_with_endpoints, TestSocket};
+        use crate::wire::{IpAddress, IpEndpoint, Ipv4Address};
         //smoltcp - the usual way
         net_debug!("\n Normal poll - Ingress modified");
         let (mut iface1, mut sockets1, mut device1) = create();
@@ -5697,12 +5842,13 @@ mod test {
         let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                port: 80
+                port: 80,
             },
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                port: 49500
-            });
+                port: 49500,
+            },
+        );
 
         //iface1.inner = Some(cx);
         // Devices sending buffer should be empty
@@ -5717,8 +5863,8 @@ mod test {
         // Enqueue the message in the sockets sending buffer
         let _result_len = socket1.send_slice(msg);
 
-        let (had_egress, last_socket_result) = iface1.test_poll_ingress(
-            timestamp, &mut device1, &mut sockets1);
+        let (had_egress, last_socket_result) =
+            iface1.test_poll_ingress(timestamp, &mut device1, &mut sockets1);
         assert_eq!((had_egress, last_socket_result), (Ok(true), Ok(())));
         assert_eq!(0, device1.num_tx_packets());
 
@@ -5730,26 +5876,25 @@ mod test {
 
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
-    fn test_ohua_state_driven_poll() {
+    fn test_ohua_poll_no_packet() {
         // OHUA: Version
-        net_debug!("\n Ohua State driven poll");
+        net_debug!("\n Ohua State driven poll no packet");
         let (mut iface, _sockets, mut device) = create();
         let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
-                port: 80
+                port: 80,
             },
             IpEndpoint {
                 addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
-                port: 49500
-            });
-
+                port: 49500,
+            },
+        );
 
         // Devices sending buffer should be empty
         assert!(device.empty_tx());
 
         let tcp_socket_handle = iface.add_socket(socket);
-
         let socket = iface.get_mut::<tcp::Socket>(tcp_socket_handle);
 
         // Sockets sending buffer should be empty before sending
@@ -5758,92 +5903,138 @@ mod test {
         assert!(socket.can_send());
         assert!(socket.send_queue() == 0);
 
+        let device_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll);
+        assert!(Either::is_left(&device_call));
+        println!("First device call");
+        let call = device_call.left_or_panic();
+        // poll starts with ingress, so device should receive first
+        assert_eq!(call, DeviceCall::Receive(iface.inner.now));
+        let iface_call = device.process_call(call).left_or_panic();
+        // Nothing was send so far, so we expect no ingress
+        assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
+        // We had nothing to send, so we expect egress to be completed
+        assert_eq!(iface.processed_any, false);
+        // Next the device has to wait for its filepointer to become available again
+        // i.e. replacing phy_wait(fd...)
+        let dev_call_wait = iface.process_call::<Loopback>(iface_call).left_or_panic();
+        assert_eq!(dev_call_wait, DeviceCall::NeedsPoll(None));
+
+        // Ressembling the m3 API, we return to the main scope when the device is
+        // ready with an optional waiting time and bool indicating readiness
+        let wait_info = device.process_call(dev_call_wait).right_or_panic();
+        // Sockets have nothing to do, so None represents 'no polling requirements'
+        assert_eq!(wait_info, (None, true));
+    }
+
+    fn test_ohua_poll_send_packet() {
+        // OHUA: Version
+        net_debug!("\n Ohua State driven poll");
+        let (mut iface, _sockets, mut device) = create();
+        let TestSocket { socket, cx: _cx } = socket_established_with_endpoints(
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address([192, 168, 1, 1])),
+                port: 80,
+            },
+            IpEndpoint {
+                addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                port: 49500,
+            },
+        );
+
+        // Devices sending buffer should be empty
+        assert!(device.empty_tx());
+
+        let tcp_socket_handle = iface.add_socket(socket);
+        let socket = iface.get_mut::<tcp::Socket>(tcp_socket_handle);
+
         let timestamp = Instant::now();
         let msg = "hello".as_bytes().to_vec();
-        let msg_ip_repr = [255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 8, 0, 69, 0, 0, 45, 0, 0, 64, 0, 64, 6, 121, 34, 192, 168, 1, 1, 255, 255, 255, 255, 0, 80, 193, 92, 0, 0, 39, 17, 255, 255, 216, 240, 80, 24, 0, 64, 232, 93, 0, 0, 104, 101, 108, 108, 111];
+        let msg_ip_repr = [
+            255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 8, 0, 69, 0, 0, 45, 0, 0, 64, 0, 64, 6,
+            121, 34, 192, 168, 1, 1, 255, 255, 255, 255, 0, 80, 193, 92, 0, 0, 39, 17, 255, 255,
+            216, 240, 80, 24, 0, 64, 232, 93, 0, 0, 104, 101, 108, 108, 111,
+        ]
+        .to_vec();
 
-        let messages = vec![(tcp_socket_handle, msg.clone())];
-        let dev_transmit_call = iface.process_call::<Loopback>(InterfaceCall::InitPoll);
-        assert!(Either::is_left(&dev_transmit_call));
-        let call = dev_transmit_call.left_or_panic();
-        assert_eq!(call, DeviceCall::Receive(iface.inner.now));
-        let iface_call = device.process_call(call);
-        // Nothing send so far, so we expect no ingress
+        // This time we send a mgs.
+        // So we expect poll to be
+        //      Ingress-> false,
+        //      Egress-> true, (because we send something)
+        //      Ingress-> true, (because we are on a loopback and get the packet back)
+        //      Egress-> false,
+        //      Ingress -> false, Egress-> false, (because we poll until both are false)
+        //   return
+        socket.send_slice(&msg);
+
+        let device_call = iface
+            .process_call::<Loopback>(InterfaceCall::InitPoll)
+            .left_or_panic();
+        let iface_call = device.process_call(device_call).left_or_panic();
+        // Nothing was send so far, so we expect no ingress
         assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
-        let dev_call_transmit = iface.process_call::<Loopback>(iface_call);
-        // We expect ingress to end, with nothing processed, and egress
-        // to start and send a call to the device to request a token
-        assert_eq!(iface.processed_any, false);
-        assert!(Either::is_left(&dev_call_transmit));
-        let dev_call = dev_call_transmit.left_or_panic();
-        assert_eq!(dev_call, DeviceCall::Transmit);
-        // Next we expect to get a token, and call dispatch on the interface
-        // This should succeed and give us a call to consume/send the packet
-        let iface_call_dispatch = device.process_call(dev_call);
-        assert_eq!(iface_call_dispatch, InterfaceCall::InnerDispatchLocal(Some(())));
-        let dev_call_send_either = iface.process_call::<Loopback>(iface_call_dispatch);
-        assert!(Either::is_left(&dev_call_send_either));
-        let dev_call_send = dev_call_send_either.left_or_panic();
-        assert_eq!(dev_call_send, DeviceCall::Consume(timestamp, msg_ip_repr.to_vec(), InterfaceState::Egress));
-        let iface_call_match_after = device.process_call(dev_call_send);
-        assert_eq!(iface_call_match_after, InterfaceCall::MatchSocketDispatchAfter(Ok(())));
-        let next_round_dev_call = iface.process_call::<Loopback>(iface_call_match_after);
-        // As egress was succesfull we expect `readiness_changes` to be true
-        // and another poll loop to start with ingress
-        assert_eq!(iface.readiness_changed, true);
-        assert!(Either::is_left(&next_round_dev_call));
-        let dev_receive_call = next_round_dev_call.left_or_panic();
-        assert_eq!(dev_receive_call, DeviceCall::Receive(iface.inner.now));
-        let iface_call = device.process_call(dev_receive_call);
-        // We've send something and as we're on a loopback we expect to
-        // get it back
-        assert_eq!(iface_call, InterfaceCall::ProcessIngress(Some((msg_ip_repr.to_vec(), Ok(()), Some(())))));
-        // sending a response will fail, so the interface tries to receive again
-        let dev_receive_call2 = iface.process_call::<Loopback>(iface_call).left_or_panic();
-        assert_eq!(dev_receive_call2, DeviceCall::Receive(timestamp));
-        // again we'll get a ProcessIngress call, that will find no new packet
-        let iface_call = device.process_call(dev_receive_call2);
-        assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
-        // Now the interface will loop a bit
-        // first it switches to egress again
-        // second as there is no new packet, but there was some in the last round
-        //  it will enter the poll loop once again with ingress
-        // third it outputs a new receive request to the device
-        let device_call = iface.process_call::<Loopback>(iface_call).left_or_panic();
-        assert_eq!(device_call, DeviceCall::Receive(iface.inner.now));
-        // again we'll get a ProcessIngress call, that will find no new packet
-        let iface_call = device.process_call(device_call);
-        assert_eq!(iface_call, InterfaceCall::ProcessIngress(None));
-        // and now the interface will loop on to the end of poll as nothing changed
-        let final_output = iface.process_call::<Loopback>(iface_call);
-        assert!(Either::is_right(&final_output));
-        assert_eq!(final_output.right_or_panic(), (true, vec![(SocketHandle::from_index(0), vec![])]));
-        /*
-        let iface_call_post_process = device.process_call(dev_call);
-
-        assert_eq!(iface_call_post_process, InterfaceCall::MatchSocketDispatchAfter(Ok(())));
-        let poll_result_and_messages = iface.process_call::<Loopback>(iface_call_post_process);
-        assert!(Either::is_right(&poll_result_and_messages));
-        let (poll_result, messages) = poll_result_and_messages.right_or_panic();
-        assert_eq!(poll_result, true);
-        // We don't have ingress right now, so mmessages should be empty
-        assert_eq!(messages, vec![]);
-        // Also, because of lacking ingress, the device should have one packet now
-        assert_eq!(device.num_tx_packets(), 1);
-        assert_eq!(iface.emitted_any, false);*/
-
-        /*
-        // Again make sure the data arrived at the device level:
-        // Devices sending buffer should contain our packet
-        assert_eq!(1, device2.num_tx_packets());
-        net_debug!("one packet in the buffer :-)");
-
-       // compare the states of both sockets
-       let s1 = sockets1.get_mut::<tcp::Socket>(tcp_socket_handle1).state();
-       let s2 = sockets2.get_mut::<tcp::Socket>(tcp_socket_handle).state();
-       assert_eq!(s1, s2);*/
+        // Next we expect a transmit call to the device because the
+        // socket has something to send
+        let device_transmit = iface.process_call::<Loopback>(iface_call).left_or_panic();
+        assert_eq!(device_transmit, DeviceCall::Transmit);
+        let iface_call_dispatch = device.process_call(device_transmit).left_or_panic();
+        // We don't actually send token, but merely a Some(()) to represent
+        // sending permission
+        assert_eq!(
+            iface_call_dispatch,
+            InterfaceCall::InnerDispatchLocal(Some(()))
+        );
+        let device_call_send = iface
+            .process_call::<Loopback>(iface_call_dispatch)
+            .left_or_panic();
+        // We should get a packet to send i.e. consume token and IP packet now
+        assert_eq!(
+            device_call_send,
+            DeviceCall::Consume(timestamp, msg_ip_repr.clone(), InterfaceState::Egress)
+        );
+        let iface_call_dispatch_after = device.process_call(device_call_send).left_or_panic();
+        assert_eq!(
+            iface_call_dispatch_after,
+            InterfaceCall::MatchSocketDispatchAfter(Ok(()))
+        );
+        // There's nothing more to send, but poll state changed,
+        // so we loop to start poll again, beginning with Ingress, expecting a
+        // call to the device to receive packets
+        let device_call_recv = iface
+            .process_call::<Loopback>(iface_call_dispatch_after)
+            .left_or_panic();
+        assert_eq!(device_call_recv, DeviceCall::Receive(timestamp));
+        let iface_call_process = device.process_call(device_call_recv).left_or_panic();
+        // We get the exact same package backe that we sent before
+        assert_eq!(
+            iface_call_process,
+            InterfaceCall::ProcessIngress(Some((msg_ip_repr, Ok(()), Some(()))))
+        );
+        // After processing the packet, Ingress should be done, we also
+        // have no packet to send any more so no device calls for egress and straight
+        // back to ingress
+        let device_call_recv = iface
+            .process_call::<Loopback>(iface_call_process)
+            .left_or_panic();
+        assert_eq!(device_call_recv, DeviceCall::Receive(timestamp));
+        let iface_call_process = device.process_call(device_call_recv).left_or_panic();
+        assert_eq!(iface_call_process, InterfaceCall::ProcessIngress(None));
+        // nothing to receive, nothing to send but we had an incomming msg to
+        // forward to the store
+        let to_store = iface
+            .process_call::<Loopback>(iface_call_process)
+            .right_or_panic();
+        assert_eq!(iface.processed_any, true);
+        let message_to_socket = vec![(tcp_socket_handle, msg)];
+        assert_eq!(to_store, (true, message_to_socket));
+        // Since we're on a loopback, we could do the
+        // whole thing again. But we choose to send no response for now
+        // The store would return an AnswerToSocket call
+        let iface_call = InterfaceCall::AnswerToSocket(vec![]);
+        // next we expect to wait as in the packet-less test before
+        let device_call_wait = iface.process_call::<Loopback>(iface_call).left_or_panic();
+        assert_eq!(device_call_wait, DeviceCall::NeedsPoll(None));
     }
-/*
+    /*
     #[test]
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp", feature = "ohua"))]
     fn test_ohua_normal_no_packet() {

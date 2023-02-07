@@ -36,7 +36,6 @@ pub mod raw_ohua;
 #[cfg(feature = "async")]
 mod waker;
 
-
 #[cfg(feature = "async")]
 pub(crate) use self::waker::WakerRegistration;
 
@@ -95,19 +94,19 @@ impl<'a> Socket<'a> {
             Socket::Dns(s) => s.poll_at(cx),
         }
     }
-/*
-    pub(crate)  fn poll_at_ohua(&self, cx: &mut OContext) -> PollAt {
-        match self {
-            #[cfg(feature = "ohua")]
-            Socket::OhuaTcp(s) => s.poll_at(cx),
-            #[cfg(feature = "ohua")]
-            Socket::OhuaRaw(s) => s.poll_at(cx),
-            other_socket => panic!("The 'ohua' indicates 'poll_at_ohua'\
-                    is not intended to be used by normal sockets"),
-        }
-    }
+    /*
+       pub(crate)  fn poll_at_ohua(&self, cx: &mut OContext) -> PollAt {
+           match self {
+               #[cfg(feature = "ohua")]
+               Socket::OhuaTcp(s) => s.poll_at(cx),
+               #[cfg(feature = "ohua")]
+               Socket::OhuaRaw(s) => s.poll_at(cx),
+               other_socket => panic!("The 'ohua' indicates 'poll_at_ohua'\
+                       is not intended to be used by normal sockets"),
+           }
+       }
 
- */
+    */
 }
 
 /// A conversion trait for network sockets.

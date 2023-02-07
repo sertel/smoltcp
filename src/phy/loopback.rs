@@ -57,7 +57,7 @@ impl<'a> Device<'a> for Loopback {
         })
     }
 
-    fn needs_poll(&self, _duration:Option<Duration>) -> bool {
+    fn needs_poll(&self, _duration: Option<Duration>) -> bool {
         true
     }
 }
@@ -94,13 +94,11 @@ impl<'a> phy::TxToken for TxToken<'a> {
     }
 }
 
-
-
 #[cfg(test)]
-impl Loopback{
+impl Loopback {
     pub(crate) fn empty_tx(&self) -> bool {
-            self.queue.is_empty()
-        }
+        self.queue.is_empty()
+    }
     pub(crate) fn num_tx_packets(&self) -> usize {
         self.queue.len()
     }
@@ -127,8 +125,8 @@ impl BrokenLoopback {
         }
     }
     pub(crate) fn empty_tx(&self) -> bool {
-            self.queue.is_empty()
-        }
+        self.queue.is_empty()
+    }
     pub(crate) fn num_tx_packets(&self) -> usize {
         self.queue.len()
     }
@@ -154,9 +152,7 @@ impl<'a> Device<'a> for BrokenLoopback {
         }
     }
     ///Dummy function to resemble m3 device interface
-    fn needs_poll(&self, duration:Option<Duration>) -> bool {
+    fn needs_poll(&self, _duration: Option<Duration>) -> bool {
         true
     }
-
 }
-

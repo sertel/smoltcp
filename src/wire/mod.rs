@@ -244,7 +244,6 @@ pub use self::tcp::{
 #[cfg(feature = "ohua")]
 pub use self::tcp::ReprOwned as TcpReprP;
 
-
 #[cfg(feature = "proto-dhcpv4")]
 pub use self::dhcpv4::{
     DhcpOption, DhcpOptionWriter, MessageType as DhcpMessageType, Packet as DhcpPacket,

@@ -2232,12 +2232,13 @@ impl<'a> Socket<'a> {
     // Yet I do not want to implement it again and I'm note sure if I'll need
     // the old one so here's just a wrapper for now
     pub(crate) fn dispatch_before(
-        &mut self, cx: &mut Context
+        &mut self,
+        cx: &mut Context,
     ) -> Either<((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool)), Result<(), Error>> {
         let result_optn = self.dispatch_before_optn(cx);
         match result_optn {
             None => Either::Right(Ok(())),
-            Some(packet_tuple) => Either::Left(packet_tuple)
+            Some(packet_tuple) => Either::Left(packet_tuple),
         }
     }
 
@@ -2248,9 +2249,9 @@ impl<'a> Socket<'a> {
     /// This means None comming from this function should not throw an error downstream
     /// ie.e no ok_or
     pub(crate) fn dispatch_before_optn(
-        &mut self, cx: &mut Context
-    ) -> Option<((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool))>
-   {
+        &mut self,
+        cx: &mut Context,
+    ) -> Option<((IpRepr, TcpReprP), (TcpReprP, IpRepr, bool))> {
         if self.tuple.is_none() {
             return None;
         }
@@ -2484,21 +2485,19 @@ impl<'a> Socket<'a> {
         let ip_repr_c = ip_repr.clone();
         let tcp_repr_send = TcpReprP::from(repr);
         let tcp_repr_post_process = tcp_repr_send.clone();
-        Some(
-            ((ip_repr, tcp_repr_send)
-            ,(
-                tcp_repr_post_process,
-                ip_repr_c,
-                is_keep_alive
-                )
-            )
-        )
+        Some((
+            (ip_repr, tcp_repr_send),
+            (tcp_repr_post_process, ip_repr_c, is_keep_alive),
+        ))
     }
 
     #[cfg(feature = "ohua")]
     #[allow(dead_code)] // the normal interface from the original code
     pub(crate) fn dispatch_device<F, E>(
-        &mut self, cx: &mut Context, (ip_repr,repr):(IpRepr,TcpRepr), emit: F
+        &mut self,
+        cx: &mut Context,
+        (ip_repr, repr): (IpRepr, TcpRepr),
+        emit: F,
     ) -> Result<(), E>
     where
         F: FnOnce(&mut Context, (IpRepr, TcpRepr)) -> Result<(), E>,
@@ -2515,10 +2514,10 @@ impl<'a> Socket<'a> {
     pub(crate) fn dispatch_after<E>(
         &mut self,
         cx: &mut Context,
-        (repr,_ip_repr, is_keep_alive): (TcpReprP,IpRepr ,bool)
-    ) -> Result<(), E>
-    { // We've sent something, whether useful data or a keep-alive packet, so rewind
-      // the keep-alive timer.
+        (repr, _ip_repr, is_keep_alive): (TcpReprP, IpRepr, bool),
+    ) -> Result<(), E> {
+        // We've sent something, whether useful data or a keep-alive packet, so rewind
+        // the keep-alive timer.
         self.timer.rewind_keep_alive(cx.now(), self.keep_alive);
 
         // Reset delayed-ack timer
@@ -2564,64 +2563,63 @@ impl<'a> Socket<'a> {
         Ok(())
     }
 
+    /*
+        #[cfg(feature = "ohua")]
+        pub(crate) fn dispatch_after_unit(
+            &mut self,
+            cx: &mut Context,
+            (repr, is_keep_alive): (TcpReprP, bool)
+        )//ToDo: Original Code returned Ok here. Why don't we?!
+        {
+            // We've sent something, whether useful data or a keep-alive packet, so rewind
+            // the keep-alive timer.
+            self.timer.rewind_keep_alive(cx.now(), self.keep_alive);
 
-/*
-    #[cfg(feature = "ohua")]
-    pub(crate) fn dispatch_after_unit(
-        &mut self,
-        cx: &mut Context,
-        (repr, is_keep_alive): (TcpReprP, bool)
-    )//ToDo: Original Code returned Ok here. Why don't we?!
-    {
-        // We've sent something, whether useful data or a keep-alive packet, so rewind
-        // the keep-alive timer.
-        self.timer.rewind_keep_alive(cx.now(), self.keep_alive);
-
-        // Reset delayed-ack timer
-        match self.ack_delay_timer {
-            AckDelayTimer::Idle => {}
-            AckDelayTimer::Waiting(_) => {
-                tcp_trace!("stop delayed ack timer")
+            // Reset delayed-ack timer
+            match self.ack_delay_timer {
+                AckDelayTimer::Idle => {}
+                AckDelayTimer::Waiting(_) => {
+                    tcp_trace!("stop delayed ack timer")
+                }
+                AckDelayTimer::Immediate => {
+                    tcp_trace!("stop delayed ack timer (was force-expired)")
+                }
             }
-            AckDelayTimer::Immediate => {
-                tcp_trace!("stop delayed ack timer (was force-expired)")
+            self.ack_delay_timer = AckDelayTimer::Idle;
+
+
+            // Leave the rest of the state intact if sending a keep-alive packet, since those
+            // carry a fake segment.
+            if is_keep_alive {
+                return;
             }
-        }
-        self.ack_delay_timer = AckDelayTimer::Idle;
 
+            // We've sent a packet successfully, so we can update the internal state now.
+            self.remote_last_seq = repr.seq_number + repr.segment_len();
+            self.remote_last_ack = repr.ack_number;
+            self.remote_last_win = repr.window_len;
 
-        // Leave the rest of the state intact if sending a keep-alive packet, since those
-        // carry a fake segment.
-        if is_keep_alive {
-            return;
-        }
+            if repr.segment_len() > 0 {
+                self.rtte
+                    .on_send(cx.now(), repr.seq_number + repr.segment_len());
+            }
 
-        // We've sent a packet successfully, so we can update the internal state now.
-        self.remote_last_seq = repr.seq_number + repr.segment_len();
-        self.remote_last_ack = repr.ack_number;
-        self.remote_last_win = repr.window_len;
+            if !self.seq_to_transmit(cx) && repr.segment_len() > 0 {
+                // If we've transmitted all data we could (and there was something at all,
+                // data or flag, to transmit, not just an ACK), wind up the retransmit timer.
+                self.timer
+                    .set_for_retransmit(cx.now(), self.rtte.retransmission_timeout());
+            }
 
-        if repr.segment_len() > 0 {
-            self.rtte
-                .on_send(cx.now(), repr.seq_number + repr.segment_len());
-        }
+            if self.state == State::Closed {
+                // When aborting a connection, forget about it after sending a single RST packet.
+                self.tuple = None;
+            }
 
-        if !self.seq_to_transmit(cx) && repr.segment_len() > 0 {
-            // If we've transmitted all data we could (and there was something at all,
-            // data or flag, to transmit, not just an ACK), wind up the retransmit timer.
-            self.timer
-                .set_for_retransmit(cx.now(), self.rtte.retransmission_timeout());
-        }
-
-        if self.state == State::Closed {
-            // When aborting a connection, forget about it after sending a single RST packet.
-            self.tuple = None;
+            // ToDo:: Original Code returned Ok here. Why don't we?!
         }
 
-        // ToDo:: Original Code returned Ok here. Why don't we?!
-    }
-
-*/
+    */
 
     #[allow(clippy::if_same_then_else)]
     pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
@@ -2959,18 +2957,18 @@ pub(crate) mod test {
         socket_syn_sent_with_buffer_sizes(64, 64)
     }
 
-/*
-// ToDo: refactor usage of endpoint to tuple
-    fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> TestSocket {
-        let mut s = socket();
-        s.state = State::SynSent;
-        s.local_endpoint = local;
-        s.remote_endpoint = REMOTE_END;
-        s.local_seq_no = LOCAL_SEQ;
-        s.remote_last_seq = LOCAL_SEQ;
-        s
-    }
- */
+    /*
+    // ToDo: refactor usage of endpoint to tuple
+        fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> TestSocket {
+            let mut s = socket();
+            s.state = State::SynSent;
+            s.local_endpoint = local;
+            s.remote_endpoint = REMOTE_END;
+            s.local_seq_no = LOCAL_SEQ;
+            s.remote_last_seq = LOCAL_SEQ;
+            s
+        }
+     */
     fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TestSocket {
         let mut s = socket_syn_received_with_buffer_sizes(tx_len, rx_len);
         s.state = State::Established;
@@ -2985,15 +2983,21 @@ pub(crate) mod test {
         socket_established_with_buffer_sizes(64, 64)
     }
 
-    pub(crate) fn socket_established_with_endpoints(local:IpEndpoint, remote:IpEndpoint) -> TestSocket {
+    pub(crate) fn socket_established_with_endpoints(
+        local: IpEndpoint,
+        remote: IpEndpoint,
+    ) -> TestSocket {
         let mut s = socket_established_with_buffer_sizes(64, 64);
-        s.tuple = Some(Tuple{local, remote});
+        s.tuple = Some(Tuple { local, remote });
         s
     }
 
-    pub(crate) fn socket_closing_with_endpoints(local:IpEndpoint, remote:IpEndpoint) -> OhuaTestSocket {
+    pub(crate) fn socket_closing_with_endpoints(
+        local: IpEndpoint,
+        remote: IpEndpoint,
+    ) -> TestSocket {
         let mut s = socket_closing();
-        s.tuple = Some(Tuple{local, remote});
+        s.tuple = Some(Tuple { local, remote });
         s
     }
 

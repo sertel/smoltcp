@@ -35,7 +35,9 @@ fn main() {
     let routes = Routes::new(&mut routes_storage[..]);
 
     let medium = device.capabilities().medium;
-    let mut builder = InterfaceBuilder::new().ip_addrs(ip_addrs).routes(routes);
+    let mut builder = InterfaceBuilder::new(vec![])
+        .ip_addrs(ip_addrs)
+        .routes(routes);
     if medium == Medium::Ethernet {
         builder = builder
             .hardware_addr(ethernet_addr.into())

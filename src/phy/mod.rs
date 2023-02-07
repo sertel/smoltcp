@@ -89,10 +89,10 @@ impl<'a> phy::TxToken for StmPhyTxToken<'a> {
 "##
 )]
 
-use core::fmt::Debug;
+use crate::iface::{InterfaceCall, InterfaceState};
 use crate::time::{Duration, Instant};
 use crate::{Either, Error, Result};
-use crate::iface::{InterfaceCall, InterfaceState};
+use core::fmt::Debug;
 
 #[cfg(all(
     any(feature = "phy-raw_socket", feature = "phy-tuntap_interface"),
@@ -121,9 +121,9 @@ mod tuntap_interface;
 pub use self::sys::wait;
 
 pub use self::fault_injector::FaultInjector;
-pub use self::fuzz_injector::{Fuzzer, FuzzInjector};
+pub use self::fuzz_injector::{FuzzInjector, Fuzzer};
 #[cfg(any(feature = "std", feature = "alloc"))]
-pub use self::loopback::{Loopback, BrokenLoopback};
+pub use self::loopback::{BrokenLoopback, Loopback};
 pub use self::pcap_writer::{PcapLinkType, PcapMode, PcapSink, PcapWriter};
 #[cfg(all(feature = "phy-raw_socket", unix))]
 pub use self::raw_socket::RawSocket;
@@ -328,24 +328,33 @@ pub trait Device<'a> {
     /// Get a description of device capabilities.
     fn capabilities(&self) -> DeviceCapabilities;
 
-    fn send_tokenfree(&'a mut self, timestamp:Instant, packet:Vec<u8>) -> Result<()> {
-        let sending_result
-            = self.transmit().ok_or_else(|| {
-                        net_debug!("failed to transmit IP: {}", Error::Exhausted);
-                        Error::Exhausted
-                    }).and_then(|token|
-                   token.consume(timestamp, packet.len(),
-                     |buffer| Ok(buffer.copy_from_slice(packet.as_slice()))));
+    fn send_tokenfree(&'a mut self, timestamp: Instant, packet: Vec<u8>) -> Result<()> {
+        let sending_result = self
+            .transmit()
+            .ok_or_else(|| {
+                net_debug!("failed to transmit IP: {}", Error::Exhausted);
+                Error::Exhausted
+            })
+            .and_then(|token| {
+                token.consume(timestamp, packet.len(), |buffer| {
+                    Ok(buffer.copy_from_slice(packet.as_slice()))
+                })
+            });
         sending_result
     }
 
-        /// To simplify things a bit we do not send tokens but merely the info
-    fn receive_tokenfree(&'a mut self, timestamp: Instant
+    /// To simplify things a bit we do not send tokens but merely the info
+    fn receive_tokenfree(
+        &'a mut self,
+        timestamp: Instant,
     ) -> Option<(Vec<u8>, Result<()>, Option<()>)> {
         if let Some((rx, _tx)) = self.receive() {
             let mut received_frame = vec![];
-            let receiving_result = rx.consume(timestamp, |frame| { received_frame.extend_from_slice(frame); Ok(())});
-            return Some((received_frame, receiving_result, Some(())))
+            let receiving_result = rx.consume(timestamp, |frame| {
+                received_frame.extend_from_slice(frame);
+                Ok(())
+            });
+            return Some((received_frame, receiving_result, Some(())));
         } else {
             None
         }
@@ -357,21 +366,19 @@ pub trait Device<'a> {
         } else {
             None
         }
-
     }
 
     /// Thi function returns true when the device is ready to be used
     /// in poll again. It resembles the implementation in M3
-    fn needs_poll(&self, max_duration:Option<Duration>) -> bool;
+    fn needs_poll(&self, max_duration: Option<Duration>) -> bool;
 
     // ToDo: To keep it simple we currently just send around a simple Ok
     //       instead of a token. Can this lead to requesting from one device,
     //       while sending with another? (Not in pur code but in general)
     fn process_call(
         &'a mut self,
-        dev_call_state:DeviceCall
-    ) -> Either<InterfaceCall, (Option<Duration>, bool)>
-    {
+        dev_call_state: DeviceCall,
+    ) -> Either<InterfaceCall, (Option<Duration>, bool)> {
         match dev_call_state {
             DeviceCall::Transmit
                 => Either::Left(InterfaceCall::InnerDispatchLocal(self.transmit_tokenfree())),
@@ -420,7 +427,7 @@ pub trait TxToken {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub enum DeviceCall{
+pub enum DeviceCall {
     Transmit,
     Consume(Instant, Vec<u8>, InterfaceState),
     Receive(Instant),

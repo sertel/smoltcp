@@ -13,7 +13,6 @@ mod route;
 mod socket_meta;
 mod socket_set;
 
-
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 pub(crate) use self::neighbor::Answer as NeighborAnswer;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -26,6 +25,6 @@ pub use socket_set::{SocketHandle, SocketSet, SocketStorage};
 #[cfg(any(feature = "proto-ipv4", feature = "proto-sixlowpan"))]
 pub use self::fragmentation::{PacketAssembler, PacketAssemblerSet as FragmentsCache};
 
-pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context, InterfaceCall, Messages, InterfaceState};
-
-
+pub use self::interface::{
+    Interface, InterfaceBuilder, InterfaceCall, InterfaceInner as Context, InterfaceState, Messages,
+};

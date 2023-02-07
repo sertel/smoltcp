@@ -49,7 +49,9 @@ fn main() {
     routes.add_default_ipv4_route(default_v4_gw).unwrap();
 
     let medium = device.capabilities().medium;
-    let mut builder = InterfaceBuilder::new().ip_addrs(ip_addrs).routes(routes);
+    let mut builder = InterfaceBuilder::new(vec![])
+        .ip_addrs(ip_addrs)
+        .routes(routes);
 
     #[cfg(feature = "proto-ipv4-fragmentation")]
     {
