@@ -168,7 +168,7 @@ fn main() {
 
     let cache = FragmentsCache::new(vec![], BTreeMap::new());
 
-    let mut builder = InterfaceBuilder::new()
+    let mut builder = InterfaceBuilder::new(vec![])
         .ip_addrs(ip_addrs)
         .pan_id(Ieee802154Pan(0xbeef));
     builder = builder

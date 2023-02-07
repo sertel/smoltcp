@@ -60,7 +60,7 @@ fn main() {
     ];
 
     let medium = device.capabilities().medium;
-    let mut builder = InterfaceBuilder::new().ip_addrs(ip_addrs);
+    let mut builder = InterfaceBuilder::new(vec![]).ip_addrs(ip_addrs);
 
     #[cfg(feature = "proto-ipv4-fragmentation")]
     {
