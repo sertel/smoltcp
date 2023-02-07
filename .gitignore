@@ -1,5 +1,9 @@
 /target
 Cargo.lock
 *.pcap
-k-v-original/target/CACHEDIR.TAG k-v-original/target/debug k-v-original/target/release
-k-v-Ohua/target/CACHEDIR.TAG k-v-Ohua/target/debug k-v-Ohua/target/release
+k-v-original/target/**
+k-v-Ohua/target/**
+.idea/**
+*.perf
+perf.data*
+*.svg
