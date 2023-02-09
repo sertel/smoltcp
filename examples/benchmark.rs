@@ -17,7 +17,7 @@ use smoltcp::socket::tcp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
-const AMOUNT: usize = 1_000_000;//1_000_000_000;
+const AMOUNT: usize = 1_000_000_000;
 
 enum Client {
     Reader,
@@ -32,8 +32,8 @@ fn client(kind: Client) {
         Client::FullCircle => (1337, "sending"),
     };
     let mut stream = TcpStream::connect(("192.168.69.1", port)).unwrap();
-    let mut buffer = vec![0; 1_000]; //vec![0; 1_000_000];
-    let mut buffer_inp = vec![0; 1_000];
+    let mut buffer = vec![0; 1_000_000];
+    let mut buffer_inp = vec![0; 1_000_000];
 
     let start = Instant::now();
 
@@ -146,7 +146,7 @@ fn main() {
     let default_timeout = Some(Duration::from_millis(1000));
 
     thread::spawn(move || client(mode));
-    let mut processed = 0;
+    let mut processed_server = 0;
     while !CLIENT_DONE.load(Ordering::SeqCst) {
         let timestamp = Instant::now();
         match iface.poll(timestamp, &mut device, &mut sockets) {
@@ -163,14 +163,14 @@ fn main() {
         }
 
         if socket.can_send() {
-            if processed < AMOUNT {
+            if processed_server < AMOUNT {
                 let length = socket
                     .send(|buffer| {
-                        let length = cmp::min(buffer.len(), AMOUNT - processed);
+                        let length = cmp::min(buffer.len(), AMOUNT - processed_server);
                         (length, length)
                     })
                     .unwrap();
-                processed += length;
+                processed_server += length;
             }
         }
 
@@ -181,14 +181,14 @@ fn main() {
         }
 
         if socket.can_recv() {
-            if processed < AMOUNT {
+            if processed_server < AMOUNT {
                 let length = socket
                     .recv(|buffer| {
-                        let length = cmp::min(buffer.len(), AMOUNT - processed);
+                        let length = cmp::min(buffer.len(), AMOUNT - processed_server);
                         (length, length)
                     })
                     .unwrap();
-                processed += length;
+                processed_server += length;
             }
         }
         // tcp:1337: receive and respond
@@ -218,7 +218,8 @@ fn main() {
             Some(poll_at) if timestamp < poll_at => {
                 phy_wait(fd, Some(poll_at - timestamp)).expect("wait error");
             }
-            Some(_) => (),
+            //Adapt waiting in normal vs. Ohua version
+            Some(_) => {phy_wait(fd, Some(Duration::from_millis(0))).expect("wait error");}
             None => {
                 phy_wait(fd, default_timeout).expect("wait error");
             }

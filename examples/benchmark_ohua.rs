@@ -21,7 +21,7 @@ use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 use crate::ohua_util::init_components::{App, init_app, init_stack_and_device};
 
 
-const AMOUNT: usize = 1_000_000;//1_000_000_000;
+const AMOUNT: usize = 1_000_000_000;
 
 enum Client {
     Reader,
@@ -36,8 +36,8 @@ fn client(kind: Client) {
         Client::FullCircle => (6969, "sending"),
     };
     let mut stream = TcpStream::connect(("192.168.69.1", port)).unwrap();
-    let mut buffer = vec![0; 1_000]; //vec![0; 1_000_000];
-    let mut buffer_inp = vec![0; 1_000];
+    let mut buffer = vec![0; 1_000_000];
+    let mut buffer_inp = vec![0; 1_000_000];
 
     let start = Instant::now();
 
@@ -95,45 +95,6 @@ fn main() {
 
     let (mut ip_stack, handels, mut device):(Interface, Vec<SocketHandle>, TunTapInterface) = init_stack_and_device();
     let mut app: App = init_app(handels);
-    let mut iface_call = InterfaceCall::InitPoll;
-
-/*
-    let mut device = TunTapInterface::new("tap0", Medium::Ethernet).unwrap();
-
-    let neighbor_cache = NeighborCache::new(BTreeMap::new());
-    let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-
-    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 65535]);
-    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 65535]);
-    let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
-
-
-    let ip_addrs = [IpCidr::new(IpAddress::v4(192, 168, 69, 1), 24)];
-    let medium = device.capabilities().medium;
-
-    let mut sockets = vec![];
-    let mut builder = InterfaceBuilder::new(sockets).ip_addrs(ip_addrs);
-
-
-    let ipv4_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
-    builder = builder.ipv4_fragments_cache(ipv4_frag_cache);
-
-    let mut out_packet_buffer = [0u8; 2048];
-
-    let sixlowpan_frag_cache = FragmentsCache::new(vec![], BTreeMap::new());
-    builder = builder
-        .sixlowpan_fragments_cache(sixlowpan_frag_cache)
-        .sixlowpan_out_packet_cache(&mut out_packet_buffer[..]);
-
-    if medium == Medium::Ethernet {
-        builder = builder
-            .hardware_addr(ethernet_addr.into())
-            .neighbor_cache(neighbor_cache);
-    }
-    let mut ip_stack = builder.finalize(&mut device);
-    let tcp_handle = ip_stack.add_socket(tcp_socket);
-    let mut app: App = init_app(vec![tcp_handle]);
-*/
     let mut iface_call = InterfaceCall::InitPoll;
 
     thread::spawn(move || client(Client::FullCircle));

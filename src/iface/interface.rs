@@ -1823,7 +1823,8 @@ impl<'a> Interface<'a> {
     let duration = match self.poll_at(timestamp, & sockets) {
         Some(poll_at) if timestamp < poll_at => Some(poll_at - timestamp),
         Some(_) => Some(Duration::from_millis(0)),
-        _ => None,
+        // Reminder: This default timeout is just set for measuring with benchmark_ohua.rs
+        _ => Some(Duration::from_millis(1000)),
     };
     self.sockets.replace(sockets);
     duration
