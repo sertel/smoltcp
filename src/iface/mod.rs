@@ -18,6 +18,8 @@ pub use self::neighbor::Cache as NeighborCache;
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
 pub use self::neighbor::Neighbor;
 pub use self::route::{Route, Routes};
-pub use socket_set::{SocketHandle, SocketStorage};
+//Reminder: To be able to implement an interface outside the crate we needed
+//          to make SocketSet public
+pub use socket_set::{SocketHandle, SocketStorage, SocketSet};
 
 pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context};

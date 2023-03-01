@@ -19,7 +19,7 @@ impl<'a> SocketStorage<'a> {
 
 /// An item of a socket set.
 #[derive(Debug)]
-pub(crate) struct Item<'a> {
+pub struct Item<'a> {
     pub(crate) meta: Meta,
     pub(crate) socket: Socket<'a>,
 }
@@ -39,7 +39,7 @@ impl fmt::Display for SocketHandle {
 ///
 /// The lifetime `'a` is used when storing a `Socket<'a>`.
 #[derive(Debug)]
-pub(crate) struct SocketSet<'a> {
+pub struct SocketSet<'a> {
     sockets: ManagedSlice<'a, SocketStorage<'a>>,
 }
 
