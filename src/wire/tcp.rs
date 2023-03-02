@@ -73,7 +73,7 @@ pub struct Packet<T: AsRef<[u8]>> {
     buffer: T,
 }
 
-mod field {
+pub mod field {
     #![allow(non_snake_case)]
 
     use crate::wire::field::*;
