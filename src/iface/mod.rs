@@ -22,4 +22,4 @@ pub use self::route::{Route, Routes};
 //          to make SocketSet public
 pub use socket_set::{SocketHandle, SocketStorage, SocketSet};
 
-pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context};
+pub use self::interface::{Interface, InterfaceBuilder, InterfaceInner as Context, IpPacket};

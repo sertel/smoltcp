@@ -345,7 +345,7 @@ let iface = InterfaceBuilder::new(device, vec![])
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "medium-ethernet")]
-enum EthernetPacket<'a> {
+pub enum EthernetPacket<'a> {
     #[cfg(feature = "proto-ipv4")]
     Arp(ArpRepr),
     Ip(IpPacket<'a>),
@@ -353,7 +353,7 @@ enum EthernetPacket<'a> {
 
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) enum IpPacket<'a> {
+pub enum IpPacket<'a> {
     #[cfg(feature = "proto-ipv4")]
     Icmpv4((Ipv4Repr, Icmpv4Repr<'a>)),
     #[cfg(feature = "proto-igmp")]
@@ -371,7 +371,7 @@ pub(crate) enum IpPacket<'a> {
 }
 
 impl<'a> IpPacket<'a> {
-    pub(crate) fn ip_repr(&self) -> IpRepr {
+    pub fn ip_repr(&self) -> IpRepr {
         match self {
             #[cfg(feature = "proto-ipv4")]
             IpPacket::Icmpv4((ipv4_repr, _)) => IpRepr::Ipv4(*ipv4_repr),
@@ -390,7 +390,7 @@ impl<'a> IpPacket<'a> {
         }
     }
 
-    pub(crate) fn emit_payload(
+    pub fn emit_payload(
         &self,
         _ip_repr: IpRepr,
         payload: &mut [u8],
